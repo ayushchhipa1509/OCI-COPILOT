@@ -151,4 +151,26 @@ For **list with filtering** operations:
 
 ## Output
 
+**CRITICAL: You MUST return ONLY valid JSON. No explanations, no markdown, no extra text.**
+
+**Example of CORRECT output:**
+
+```json
+{
+  "action": "create_bucket",
+  "service": "objectstorage",
+  "params": { "name": "my-bucket" },
+  "missing_parameters": ["compartment_id"],
+  "requires_confirmation": true,
+  "safety_tier": "destructive"
+}
+```
+
+**Example of INCORRECT output:**
+
+```
+I'll create a bucket for you. Here's the plan:
+{"action": "create_bucket", "service": "objectstorage", "params": {"name": "my-bucket"}, "missing_parameters": ["compartment_id"], "requires_confirmation": true, "safety_tier": "destructive"}
+```
+
 Return ONLY the JSON plan, no extra text or explanations.

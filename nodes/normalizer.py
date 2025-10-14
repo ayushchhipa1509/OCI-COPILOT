@@ -42,14 +42,28 @@ def normalizer_node(state: AgentState) -> dict:
 
         print(f"✅ Normalizer corrected query: '{normalized_query}'")
 
-        # Route based on toggle instead of LLM decision
-        use_rag_chain = state.get("use_rag_chain", True)  # Default to RAG
+        # Check if query is executable (OCI operation) or non-executable (chat/question)
+        is_executable = response_json.get("is_executable", False)
+
+        if not is_executable:
+            print("🔄 Non-executable query detected, routing to presentation")
+            return {
+                "user_input": normalized_query,
+                "normalized_query": normalized_query,
+                "next_step": "presentation_node",
+                "last_node": "normalizer",
+                "intent": "general_chat"
+            }
+
+        # Route based on toggle for executable queries
+        # Default to OFF as per user request
+        use_rag_chain = state.get("use_rag_chain", False)
         if use_rag_chain:
             route = "rag_retriever"
-            print(f"✅ Toggle set to RAG chain. Routing to: {route}")
+            print(f"✅ Executable query + RAG toggle ON. Routing to: {route}")
         else:
             route = "planner"
-            print(f"✅ Toggle set to Planner chain. Routing to: {route}")
+            print(f"✅ Executable query + RAG toggle OFF. Routing to: {route}")
 
         return {
             "user_input": normalized_query,
@@ -59,9 +73,9 @@ def normalizer_node(state: AgentState) -> dict:
         }
 
     except Exception as e:
-        print(f"⚠️ Normalizer error, using toggle fallback: {e}")
-        # Use toggle for fallback routing
-        use_rag_chain = state.get("use_rag_chain", True)
+        print(f"⚠️ Normalizer error, using fallback routing: {e}")
+        # For fallback, assume it's executable and use toggle
+        use_rag_chain = state.get("use_rag_chain", False)  # Default to OFF
         route = "rag_retriever" if use_rag_chain else "planner"
 
         return {

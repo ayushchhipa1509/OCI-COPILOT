@@ -23,7 +23,7 @@ while response.has_next_page:
         results.append(to_dict(user))
 ```
 
-### 2. List Users with MFA Disabled (Multi-step)
+### 2. List Users with MFA Disabled (Efficient Single-Step)
 
 ```python
 # oci_config is available directly in execution context
@@ -35,16 +35,10 @@ while response.has_next_page:
     all_users.extend(response.data)
 
 for user in all_users:
-    try:
-        # Check MFA devices for this user
-        mfa_devices_response = identity_client.list_mfa_totp_devices(user_id=user.id)
-
-        # User has MFA DISABLED if no devices found
-        if not mfa_devices_response.data:
-            results.append(to_dict(user))
-
-    except oci.exceptions.ServiceError:
-        continue  # Skip users we cannot check
+    # EFFICIENT: Directly check the user's 'is_mfa_activated' attribute
+    # The 'user' object already has this information, no extra API call needed
+    if not user.is_mfa_activated:
+        results.append(to_dict(user))
 ```
 
 ### 3. List Groups

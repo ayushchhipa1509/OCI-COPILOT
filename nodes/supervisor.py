@@ -126,27 +126,10 @@ def supervisor_node(state: AgentState) -> dict:
     print(f"Last node was: {state.get('last_node')}")
     print("=" * 60)
 
-    # If this is the start of the graph, use LLM to determine routing
+    # If this is the start of the graph, route directly to normalizer
     if state.get("last_node") is None:
-        user_input = state.get("user_input", "")
-        call_llm_func = state.get("call_llm", default_call_llm)
-
-        print("🕵️ Entry point: Analyzing query intent with LLM...")
-
-        # Use LLM to determine if this should go directly to presentation
-        routing_decision = _analyze_query_routing(
-            user_input, call_llm_func, state)
-
-        if routing_decision["route_to_presentation"]:
-            print(
-                f"🕵️ Entry point: {routing_decision['reason']}, routing to presentation")
-            return {
-                "next_step": "presentation_node",
-                "intent": routing_decision["intent"]
-            }
-        else:
-            print("🕵️ Entry point: OCI operation detected, routing to normalizer")
-            return {"next_step": "normalizer"}
+        print("🕵️ Entry point: Routing to normalizer for query analysis")
+        return {"next_step": "normalizer"}
 
     # If called from the planner, check for confirmation requirements or failures
     if state.get("last_node") == "planner":
@@ -161,6 +144,34 @@ def supervisor_node(state: AgentState) -> dict:
                 "planner_retry": True,
                 "retry_reason": "Plan generation failed"
             }
+
+        # Check for missing parameters first
+        missing_params = plan.get("missing_parameters", [])
+        print(f"🔍 DEBUG Supervisor: Plan keys: {list(plan.keys())}")
+        print(
+            f"🔍 DEBUG Supervisor: Missing params from plan: {missing_params}")
+        if missing_params:
+            print(
+                f"🕵️ Supervisor: Missing parameters detected: {missing_params}")
+
+            # Check if we can automatically fetch some parameters
+            if "compartment_id" in missing_params:
+                print("🕵️ Supervisor: Can auto-fetch compartments, triggering sub-task")
+                return {
+                    "next_step": "planner",
+                    "sub_task": "list_compartments",
+                    "pending_plan": plan,
+                    "missing_parameters": missing_params,
+                    "auto_fetch_required": True
+                }
+            else:
+                return {
+                    "next_step": "presentation_node",
+                    "parameter_gathering_required": True,
+                    "missing_parameters": missing_params,
+                    "pending_plan": plan,
+                    "gathering_type": "parameter_selection"
+                }
 
         # Check for confirmation requirements
         if plan and plan.get("requires_confirmation"):
@@ -194,6 +205,54 @@ def supervisor_node(state: AgentState) -> dict:
                 "action_cancelled": True,
                 "cancellation_reason": "User declined to proceed with the operation"
             }
+
+    # If called from presentation with parameter selection response
+    if state.get("last_node") == "presentation_node" and state.get("parameter_selection_response"):
+        from nodes.presentation_node import _parse_parameter_response
+
+        user_input = state.get("parameter_selection_response", "")
+        missing_params = state.get("missing_parameters", [])
+        pending_plan = state.get("pending_plan")
+
+        # Parse the user's parameter response
+        compartment_data = state.get("compartment_data", [])
+        selected_params = _parse_parameter_response(
+            user_input, missing_params, compartment_data)
+
+        print(f"🕵️ Supervisor: User selected parameters: {selected_params}")
+
+        # Update the plan with selected parameters
+        if pending_plan and "params" in pending_plan:
+            pending_plan["params"].update(selected_params)
+            print(
+                f"🕵️ Supervisor: Updated plan with parameters: {pending_plan['params']}")
+
+        # Check if we still need confirmation
+        if pending_plan.get("requires_confirmation"):
+            print("🕵️ Supervisor: Parameters gathered, now requesting confirmation")
+            return {
+                "next_step": "presentation_node",
+                "confirmation_required": True,
+                "pending_plan": pending_plan,
+                "confirmation_type": "safety_confirmation"
+            }
+        else:
+            print("🕵️ Supervisor: Parameters gathered, proceeding to codegen")
+            return {
+                "next_step": "codegen",
+                "plan": pending_plan,
+                "parameters_updated": True
+            }
+
+    # If called from planner with compartment listing result
+    if state.get("last_node") == "planner" and state.get("sub_task_result") == "compartment_listing":
+        print("🕵️ Supervisor: Compartment listing completed, routing to presentation")
+        return {
+            "next_step": "presentation_node",
+            "compartment_listing_complete": True,
+            "pending_plan": state.get("pending_plan"),
+            "missing_parameters": state.get("missing_parameters", [])
+        }
 
     # If called from the verifier, handle syntax/static analysis errors
     if state.get("last_node") == "verifier":

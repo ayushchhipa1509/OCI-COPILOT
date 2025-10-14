@@ -126,4 +126,56 @@ for compartment in all_compartments:
 - Always implement pagination for all list operations
 - Handle service errors gracefully with try/except blocks
 
+### 4. Create Action: `create_instance`
 
+When the plan action is `create_instance`, you must generate code to create a Compute Instance, incorporating security best practices.
+
+```python
+from oci.util import to_dict
+
+# Create Compute client
+compute_client = get_client('compute', oci_config)
+
+# Extract details from the plan's params
+compartment_id = plan['params'].get('compartment_id')
+shape = plan['params'].get('shape')
+image_id = plan['params'].get('image_id')
+subnet_id = plan['params'].get('subnet_id')
+display_name = plan['params'].get('display_name')
+ssh_authorized_keys = plan['params'].get('ssh_authorized_keys')
+
+# Define the launch details for the new instance
+launch_details = oci.core.models.LaunchInstanceDetails(
+    compartment_id=compartment_id,
+    display_name=display_name,
+    shape=shape,
+    source_details=oci.core.models.InstanceSourceViaImageDetails(
+        image_id=image_id
+    ),
+    create_vnic_details=oci.core.models.CreateVnicDetails(
+        subnet_id=subnet_id
+    ),
+    metadata={
+        "ssh_authorized_keys": ssh_authorized_keys
+    },
+    # CIS Benchmark 3.1: Disable the legacy metadata service endpoint for enhanced security
+    instance_options=oci.core.models.InstanceOptions(
+        are_legacy_imds_endpoints_disabled=True
+    ),
+    launch_options=oci.core.models.LaunchOptions(
+        # CIS Benchmark 3.3: Enable in-transit encryption for boot volumes by default
+        is_pv_encryption_in_transit_enabled=True,
+        boot_volume_type='PARAVIRTUALIZED'
+    )
+    # NOTE: CIS Benchmark 3.2 recommends enabling Secure Boot for shielded instances where supported.
+    # This can be configured via the 'platform_config' parameter.
+)
+
+# Launch the instance
+launch_instance_response = compute_client.launch_instance(
+    launch_instance_details=launch_details
+)
+
+# Append the created resource details (as a dictionary) to the results
+results.append(to_dict(launch_instance_response.data))
+```

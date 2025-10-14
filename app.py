@@ -21,10 +21,10 @@ except ImportError:
     GRAPH_VIZ_AVAILABLE = False
     print("⚠️ Graph visualization disabled - install networkx and matplotlib")
 
-# RAG imports
-from rag.tenancy_scanner import master_tenancy_scan
-from rag.embeddings import get_embedding
-from rag.vectorstore import get_chroma_client, add_to_store
+# RAG imports (conditional - only when RAG is enabled)
+# from rag.tenancy_scanner import master_tenancy_scan
+# from rag.embeddings import get_embedding
+# from rag.vectorstore import get_chroma_client, add_to_store
 from oci_ops.clients import build_config
 from core.langsmith import status_badge
 from typing import List, Dict, Any, Optional
@@ -40,26 +40,27 @@ def test_api_connection(provider):
     start_time = time.time()
 
     try:
+        test_messages = [
+            {"role": "user", "content": "Hello, this is a test message. Please respond with 'API test successful'."}
+        ]
+
         if provider == "gemini":
             from core.llm_manager import _call_gemini
-            test_messages = [
-                {"role": "user", "content": "Hello, this is a test message. Please respond with 'API test successful'."}
-            ]
             response = _call_gemini(test_messages)
-            response_time = time.time() - start_time
-            return {"success": True, "response_time": response_time, "response": response}
-
+        elif provider == "openai":
+            from core.llm_manager import _call_openai
+            response = _call_openai(test_messages)
+        elif provider == "anthropic":
+            from core.llm_manager import _call_anthropic
+            response = _call_anthropic(test_messages)
         elif provider == "groq":
             from core.llm_manager import _call_groq
-            test_messages = [
-                {"role": "user", "content": "Hello, this is a test message. Please respond with 'API test successful'."}
-            ]
             response = _call_groq(test_messages)
-            response_time = time.time() - start_time
-            return {"success": True, "response_time": response_time, "response": response}
-
         else:
             return {"success": False, "error": f"Unknown provider: {provider}"}
+
+        response_time = time.time() - start_time
+        return {"success": True, "response_time": response_time, "response": response}
 
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -76,11 +77,19 @@ def perform_master_scan(state):
     """
     Perform enhanced master tenancy scan using the new RAG system.
     """
+    # Only perform scan if RAG is enabled
+    if not st.session_state.get('use_rag_chain', False):
+        st.sidebar.warning(
+            "⚠️ RAG is disabled. Enable RAG toggle to use tenancy scanning.")
+        return
+
     st.sidebar.info("🔍 Starting Enhanced Master Tenancy Scan...")
     st.sidebar.info(
         "📊 Scanning ALL compartments with improved data quality...")
 
     try:
+        # Import RAG functions only when needed
+        from rag.tenancy_scanner import master_tenancy_scan
         # Run master tenancy scan
         scan_result = master_tenancy_scan(state)
 
@@ -111,8 +120,19 @@ def append_chat(role, text):
 
 
 def render_chat_history():
-    for sender, message in st.session_state.get('chat_history', []):
-        st.chat_message("🧑" if sender == 'user' else "🤖").markdown(message)
+    chat_history = st.session_state.get('chat_history', [])
+
+    # Show simple welcome message if no chat history
+    if not chat_history:
+        with st.chat_message("🤖"):
+            st.markdown("""
+<div style="text-align: center; padding: 20px;">
+<h1>Welcome!!</h1>
+</div>
+            """, unsafe_allow_html=True)
+    else:
+        for sender, message in chat_history:
+            st.chat_message("🧑" if sender == 'user' else "🤖").markdown(message)
 
 
 def render_table(items: List[Dict[str, Any]], title: Optional[str] = None, preferred_cols: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
@@ -223,8 +243,8 @@ def draw_graph_matplotlib(agent_graph):
 
 # --- Initialization ---
 load_dotenv(dotenv_path='.env', override=True)
-st.set_page_config(page_title="OCI COPILOT", layout="wide")
-st.title("🚀 OCI COPILOT")
+st.set_page_config(page_title="CloudAgentra", layout="wide")
+st.title("☁️ CloudAgentra")
 
 init_session()
 if "agent_graph" not in st.session_state:
@@ -244,224 +264,304 @@ def fetch_namespace(cfg):
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ Agent Configuration")
-    provider_map = {"Google (Gemini 2.5 Pro)": "gemini",
-                    "Groq (Llama 3)": "groq"}
-    display_name = st.selectbox(
-        "Select LLM Provider", provider_map.keys(), index=0)
-    st.session_state['llm_preference'] = {
-        "provider": provider_map[display_name]}
-    st.divider()
-    st.header("🔑 API Keys")
-    os.environ['GOOGLE_API_KEY'] = st.text_input("Gemini API Key", value=os.getenv(
-        'GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', ''), type="password")
-    os.environ['GROQ_API_KEY'] = st.text_input(
-        "Groq API Key", value=os.getenv('GROQ_API_KEY', ''), type="password")
+    st.header("☁️ CloudAgentra")
+    st.caption("Your Cloud Assistant")
+    # Collapsible LLM Configuration Section
+    with st.expander("🤖 LLM Configuration", expanded=True):
+        # Dynamic LLM Provider Selection
+        provider_map = {
+            "Google (Gemini 2.5 Pro)": "gemini",
+            "OpenAI (GPT-4)": "openai",
+            "Groq (Llama 3)": "groq",
+            "Anthropic (Claude)": "anthropic"
+        }
 
-    # API Test Section
-    st.subheader("🧪 Test API Connection")
-    if st.button("Test Selected API"):
+        display_name = st.selectbox(
+            "Select LLM Provider", provider_map.keys(), index=0)
         selected_provider = provider_map[display_name]
-        test_result = test_api_connection(selected_provider)
-        if test_result["success"]:
-            st.success(f"✅ {selected_provider.upper()} API working!")
-            st.info(f"Response time: {test_result['response_time']:.2f}s")
-        else:
-            st.error(
-                f"❌ {selected_provider.upper()} API failed: {test_result['error']}")
+
+        st.session_state['llm_preference'] = {
+            "provider": selected_provider}
+
+        # Dynamic API Key Input based on selected provider
+        if selected_provider == "gemini":
+            api_key = st.text_input(
+                "Google API Key",
+                value=os.getenv('GOOGLE_API_KEY', '') or os.getenv(
+                    'GEMINI_API_KEY', ''),
+                type="password",
+                help="Get your API key from Google AI Studio"
+            )
+            if api_key:
+                os.environ['GOOGLE_API_KEY'] = api_key
+
+        elif selected_provider == "openai":
+            api_key = st.text_input(
+                "OpenAI API Key",
+                value=os.getenv('OPENAI_API_KEY', ''),
+                type="password",
+                help="Get your API key from OpenAI Platform"
+            )
+            if api_key:
+                os.environ['OPENAI_API_KEY'] = api_key
+
+        elif selected_provider == "groq":
+            api_key = st.text_input(
+                "Groq API Key",
+                value=os.getenv('GROQ_API_KEY', ''),
+                type="password",
+                help="Get your API key from Groq Console"
+            )
+            if api_key:
+                os.environ['GROQ_API_KEY'] = api_key
+
+        elif selected_provider == "anthropic":
+            api_key = st.text_input(
+                "Anthropic API Key",
+                value=os.getenv('ANTHROPIC_API_KEY', ''),
+                type="password",
+                help="Get your API key from Anthropic Console"
+            )
+            if api_key:
+                os.environ['ANTHROPIC_API_KEY'] = api_key
+
+        # API Test Section
+        if st.button("🧪 Test API Connection"):
+            test_result = test_api_connection(selected_provider)
+            if test_result["success"]:
+                st.success(f"✅ {selected_provider.upper()} API working!")
+                st.info(f"Response time: {test_result['response_time']:.2f}s")
+            else:
+                st.error(
+                    f"❌ {selected_provider.upper()} API failed: {test_result['error']}")
+
     st.divider()
-    st.header("☁️ OCI Config")
-    show_creds = st.checkbox("Show OCI creds", value=False)
-    try:
-        defaults = build_config({})
-    except Exception:
-        defaults = {}
+    # Collapsible OCI Configuration Section
+    with st.expander("☁️ OCI Cloud Configuration", expanded=False):
+        show_creds = st.checkbox("Show OCI creds", value=False)
+        try:
+            defaults = build_config({})
+        except Exception:
+            defaults = {}
 
-    # Private key input method
-    key_input_method = st.radio(
-        "Private Key Input", ["File Path", "Paste Content"], horizontal=True)
+        oci_creds = {
+            'tenancy': st.text_input("Tenancy OCID", value=defaults.get('tenancy') or os.getenv('OCI_TENANCY', ''), type="default" if show_creds else "password"),
+            'user': st.text_input("User OCID", value=defaults.get('user') or os.getenv('OCI_USER', ''), type="default" if show_creds else "password"),
+            'fingerprint': st.text_input("Key Fingerprint", value=defaults.get('fingerprint') or os.getenv('OCI_FINGERPRINT', ''), type="default" if show_creds else "password"),
+            'region': st.text_input("Region", value=defaults.get('region') or os.getenv('OCI_REGION', 'ap-mumbai-1'))
+        }
 
-    oci_creds = {
-        'tenancy': st.text_input("Tenancy OCID", value=defaults.get('tenancy') or os.getenv('OCI_TENANCY', ''), type="default" if show_creds else "password"),
-        'user': st.text_input("User OCID", value=defaults.get('user') or os.getenv('OCI_USER', ''), type="default" if show_creds else "password"),
-        'fingerprint': st.text_input("Key Fingerprint", value=defaults.get('fingerprint') or os.getenv('OCI_FINGERPRINT', ''), type="default" if show_creds else "password"),
-        'region': st.text_input("Region", value=defaults.get('region') or os.getenv('OCI_REGION', 'ap-mumbai-1'))
-    }
+        # Auto-fill private key from .oci folder or environment
+        default_key = ""
+        # Try to read from .oci/config file first
+        try:
+            oci_config_path = os.path.expanduser("~/.oci/config")
+            if os.path.exists(oci_config_path):
+                import configparser
+                config = configparser.ConfigParser()
+                config.read(oci_config_path)
+                if 'DEFAULT' in config and 'key_file' in config['DEFAULT']:
+                    key_file_path = config['DEFAULT']['key_file']
+                    if os.path.exists(key_file_path):
+                        with open(key_file_path, 'r') as f:
+                            default_key = f.read()
+        except:
+            pass
 
-    if key_input_method == "File Path":
-        oci_creds['key_file'] = st.text_input("Private Key file path", value=defaults.get(
-            'key_file') or os.getenv('OCI_KEY_FILE', ''))
-    else:
+        # Fallback to environment variables
+        if not default_key:
+            default_key = os.getenv('OCI_PRIVATE_KEY', '') or os.getenv(
+                'OCI_KEY_CONTENT', '')
+
         oci_creds['key_content'] = st.text_area("Paste Private Key Content",
+                                                value=default_key,
                                                 height=150,
                                                 help="Paste your entire private key including -----BEGIN RSA PRIVATE KEY----- and -----END RSA PRIVATE KEY-----")
 
-    st.session_state['oci_creds'] = oci_creds
-    namespace = fetch_namespace(st.session_state['oci_creds'])
-    if namespace:
-        st.session_state['oci_creds']['namespace'] = namespace
-    st.divider()
-    st.header("🔄 Chain Routing")
-
-    # Toggle for RAG vs Planner chain
-    use_rag_chain = st.toggle(
-        "🧠 Use RAG Chain",
-        value=False,
-        help="Toggle between RAG chain (for cached data) and Planner chain (for live execution)"
-    )
-
-    # Store the toggle state in session
-    st.session_state['use_rag_chain'] = use_rag_chain
-
-    if use_rag_chain:
-        st.sidebar.info(
-            "🧠 **RAG Chain Active** - Queries will use cached data")
-    else:
-        st.sidebar.info(
-            "⚙️ **Planner Chain Active** - Queries will execute live OCI operations")
-
-    st.divider()
-    st.header("🛠️ Tools")
-
-    # Master Tenancy Scan Button
-    if st.button("🔍 Scan Master Tenancy"):
-        if st.session_state.get('oci_creds'):
-            # Create a state object for the scan with LLM preferences
-            scan_state = {
-                'oci_creds': st.session_state['oci_creds'],
-                'session_id': st.session_state.get('session_id', 'unknown'),
-                'llm_preference': st.session_state.get('llm_preference', {"provider": "openai"}),
-                'call_llm': call_llm
-            }
-            perform_master_scan(scan_state)
+        # Test OCI Connection
+        if st.button("🧪 Test OCI Connection"):
+            try:
+                namespace = fetch_namespace(oci_creds)
+                if namespace:
+                    st.success("✅ OCI Connection Successful!")
+                    st.info(f"Namespace: {namespace}")
+                    st.session_state['oci_creds'] = oci_creds
+                    st.session_state['oci_creds']['namespace'] = namespace
+                else:
+                    st.error("❌ OCI Connection Failed - Check credentials")
+            except Exception as e:
+                st.error(f"❌ OCI Connection Error: {str(e)}")
         else:
-            st.sidebar.error("❌ Please configure OCI credentials first!")
+            st.session_state['oci_creds'] = oci_creds
+            namespace = fetch_namespace(st.session_state['oci_creds'])
+            if namespace:
+                st.session_state['oci_creds']['namespace'] = namespace
 
     st.divider()
-    st.header("📊 Enhanced RAG Status")
+    # Chain Routing Section
+    with st.expander("🔄 Chain Routing", expanded=False):
+        # Toggle for RAG vs Planner chain
+        use_rag_chain = st.toggle(
+            "🧠 Use RAG Chain",
+            value=False,
+            help="Toggle between RAG chain (for cached data) and Planner chain (for live execution)"
+        )
 
-    # Show enhanced vector store status
-    try:
-        from rag.vectorstore import get_vector_store
-        vector_store = get_vector_store()
-        stats = vector_store.get_collection_stats()
+        # Store the toggle state in session
+        st.session_state['use_rag_chain'] = use_rag_chain
 
-        if "error" in stats:
-            st.sidebar.warning(f"⚠️ Vector Store: Error - {stats['error']}")
-            st.sidebar.info(
+        if use_rag_chain:
+            st.info("🧠 **RAG Chain Active** - Queries will use cached data")
+        else:
+            st.info(
+                "⚙️ **Planner Chain Active** - Queries will execute live OCI operations")
+
+    st.divider()
+    # Tools Section
+    with st.expander("🛠️ Tools", expanded=False):
+        # Master Tenancy Scan Button
+        if st.button("🔍 Scan Master Tenancy"):
+            if st.session_state.get('oci_creds'):
+                # Create a state object for the scan with LLM preferences
+                scan_state = {
+                    'oci_creds': st.session_state['oci_creds'],
+                    'session_id': st.session_state.get('session_id', 'unknown'),
+                    'llm_preference': st.session_state.get('llm_preference', {"provider": "openai"}),
+                    'call_llm': call_llm
+                }
+                perform_master_scan(scan_state)
+            else:
+                st.error("❌ Please configure OCI credentials first!")
+
+    # Add divider between Tools and RAG
+    st.divider()
+
+    # Collapsible RAG Status Section
+    with st.expander("RAG", expanded=False):
+        # Show enhanced vector store status
+        try:
+            # Only import and initialize RAG when RAG is enabled
+            if st.session_state.get('use_rag_chain', False):
+                from rag.vectorstore import get_vector_store
+                vector_store = get_vector_store()
+                stats = vector_store.get_collection_stats()
+            else:
+                st.info(
+                    "💡 RAG is disabled. Enable RAG toggle to use vector store features.")
+                stats = {"status": "disabled"}
+
+            if stats.get("status") == "disabled":
+                # RAG is disabled, show appropriate message
+                pass
+            elif "error" in stats:
+                st.warning(f"⚠️ Vector Store: Error - {stats['error']}")
+                st.info(
+                    "💡 Try running 'Scan Master Tenancy' to initialize the vector store")
+            else:
+                st.info(
+                    f"📚 Enhanced Vector Store: {stats.get('total_documents', 0)} documents")
+                st.info(f"🔧 Services: {len(stats.get('services', []))}")
+                st.info(
+                    f"📁 Compartments: {len(stats.get('compartments', []))}")
+                st.info(
+                    f"🔢 Total Resources: {stats.get('total_resources', 0)}")
+
+                # Show services
+                services = stats.get('services', [])
+                if services:
+                    st.info(f"🔧 Available: {', '.join(services[:3])}")
+                    if len(services) > 3:
+                        st.info(f"🔧 ... and {len(services) - 3} more")
+        except Exception as e:
+            st.warning(f"⚠️ Enhanced Vector Store: Error - {str(e)}")
+            st.info(
                 "💡 Try running 'Scan Master Tenancy' to initialize the vector store")
-        else:
-            st.sidebar.info(
-                f"📚 Enhanced Vector Store: {stats.get('total_documents', 0)} documents")
-            st.sidebar.info(f"🔧 Services: {len(stats.get('services', []))}")
-            st.sidebar.info(
-                f"📁 Compartments: {len(stats.get('compartments', []))}")
-            st.sidebar.info(
-                f"🔢 Total Resources: {stats.get('total_resources', 0)}")
 
-            # Show services
-            services = stats.get('services', [])
-            if services:
-                st.sidebar.info(f"🔧 Available: {', '.join(services[:3])}")
-                if len(services) > 3:
-                    st.sidebar.info(f"🔧 ... and {len(services) - 3} more")
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ Enhanced Vector Store: Error - {str(e)}")
-        st.sidebar.info(
-            "💡 Try running 'Scan Master Tenancy' to initialize the vector store")
+        st.divider()
 
-    # RAG System initialization button
-    if st.button("🔧 Initialize RAG System"):
-        try:
-            from rag.init_rag import initialize_rag_system, check_rag_health
+        # RAG System initialization button
+        if st.button("🔧 Initialize RAG System"):
+            try:
+                from rag.init_rag import initialize_rag_system, check_rag_health
 
-            with st.spinner("Initializing RAG system..."):
-                init_results = initialize_rag_system()
+                with st.spinner("Initializing RAG system..."):
+                    init_results = initialize_rag_system()
 
-            if init_results["success"]:
-                st.sidebar.success("✅ RAG System initialized successfully!")
-                st.sidebar.info(
-                    f"📊 Completed {len(init_results['steps_completed'])} steps")
+                if init_results["success"]:
+                    st.success("✅ RAG System initialized successfully!")
+                    st.info(
+                        f"📊 Completed {len(init_results['steps_completed'])} steps")
+                    if init_results.get("warnings"):
+                        st.warning("⚠️ Warnings:")
+                        for warning in init_results["warnings"][:2]:
+                            st.info(f"   • {warning}")
+                else:
+                    st.error("❌ RAG System initialization failed!")
+                    # Show first 2 errors
+                    for error in init_results["errors"][:2]:
+                        st.error(f"   • {error}")
 
-                if init_results["warnings"]:
-                    st.sidebar.warning(
-                        f"⚠️ {len(init_results['warnings'])} warnings")
-                    # Show first 2 warnings
-                    for warning in init_results["warnings"][:2]:
-                        st.sidebar.info(f"   • {warning}")
-            else:
-                st.sidebar.error("❌ RAG System initialization failed!")
-                for error in init_results["errors"][:2]:  # Show first 2 errors
-                    st.sidebar.error(f"   • {error}")
-
-            # Run health check
-            with st.spinner("Running health check..."):
+                # Check health after initialization
                 health_results = check_rag_health()
+                if health_results["healthy"]:
+                    st.success("🏥 RAG System is healthy!")
+                else:
+                    st.warning("⚠️ RAG System has issues")
+                    # Show first 2 issues
+                    for issue in health_results["issues"][:2]:
+                        st.warning(f"   • {issue}")
 
-            if health_results["healthy"]:
-                st.sidebar.success("🏥 RAG System is healthy!")
-            else:
-                st.sidebar.warning("⚠️ RAG System has issues")
-                for issue in health_results["issues"][:2]:  # Show first 2 issues
-                    st.sidebar.warning(f"   • {issue}")
-
-                if health_results["recommendations"]:
-                    st.sidebar.info("💡 Recommendations:")
-                    # Show first 2 recommendations
+                # Show recommendations
+                if health_results.get("recommendations"):
+                    st.info("💡 Recommendations:")
                     for rec in health_results["recommendations"][:2]:
-                        st.sidebar.info(f"   • {rec}")
+                        st.info(f"   • {rec}")
 
-        except Exception as e:
-            st.sidebar.error(f"❌ RAG initialization failed: {str(e)}")
+            except Exception as e:
+                st.error(f"❌ RAG initialization failed: {str(e)}")
 
-    # Enhanced RAG testing button
-    if st.button("🧪 Test Enhanced RAG"):
-        try:
-            from rag.test_rag import run_rag_tests
-            with st.spinner("Running comprehensive RAG tests..."):
-                test_results = run_rag_tests()
+        # Enhanced RAG testing button
+        if st.button("🧪 Test Enhanced RAG"):
+            try:
+                from rag.test_rag import run_comprehensive_rag_tests
 
-            summary = test_results.get('overall_summary', {})
-            success_rate = summary.get('success_rate', 0)
+                with st.spinner("Running comprehensive RAG tests..."):
+                    test_results = run_comprehensive_rag_tests()
 
-            if success_rate >= 0.8:
-                st.sidebar.success(f"✅ RAG Tests Passed: {success_rate:.1%}")
-            else:
-                st.sidebar.warning(
-                    f"⚠️ RAG Tests: {success_rate:.1%} success rate")
+                summary = test_results.get('overall_summary', {})
+                success_rate = summary.get('success_rate', 0)
 
-            st.sidebar.info(
-                f"📊 Tests: {summary.get('passed_tests', 0)}/{summary.get('total_tests', 0)} passed")
+                if success_rate >= 0.8:
+                    st.success(f"✅ RAG Tests Passed: {success_rate:.1%}")
+                else:
+                    st.warning(
+                        f"⚠️ RAG Tests: {success_rate:.1%} success rate")
 
-            # Show recommendations
-            recommendations = summary.get('recommendations', [])
-            if recommendations:
-                st.sidebar.info("💡 Recommendations:")
-                for rec in recommendations[:2]:  # Show first 2
-                    st.sidebar.info(f"   • {rec}")
+                st.info(
+                    f"📊 Tests: {summary.get('passed_tests', 0)}/{summary.get('total_tests', 0)} passed")
 
-        except Exception as e:
-            st.sidebar.error(f"❌ RAG Testing failed: {str(e)}")
+                # Show recommendations
+                if test_results.get('recommendations'):
+                    st.info("💡 Recommendations:")
+                    for rec in test_results["recommendations"][:2]:
+                        st.info(f"   • {rec}")
 
-    if st.button("🗑️ Clear Enhanced Vector Store"):
-        try:
-            from rag.vectorstore import get_vector_store
-            vector_store = get_vector_store()
-            success = vector_store.clear_collection()
-            if success:
-                st.sidebar.success("✅ Enhanced vector store cleared!")
-            else:
-                st.sidebar.error("❌ Failed to clear enhanced vector store")
-        except Exception as e:
-            st.sidebar.error(f"❌ Clear failed: {str(e)}")
+            except Exception as e:
+                st.error(f"❌ RAG Testing failed: {str(e)}")
 
-    if st.button("🗑️ Clear Embedding Cache"):
-        try:
-            from rag.embeddings import clear_embedding_cache
-            clear_embedding_cache()
-            st.sidebar.success("✅ Embedding cache cleared!")
-        except Exception as e:
-            st.sidebar.error(f"❌ Cache clear failed: {str(e)}")
+        if st.button("🗑️ Clear Enhanced Vector Store"):
+            try:
+                from rag.vectorstore import get_vector_store
+                vector_store = get_vector_store()
+                vector_store.clear_all_collections()
+                st.success("✅ Enhanced Vector Store cleared!")
+                st.info("💡 Run 'Initialize RAG System' to rebuild")
+            except Exception as e:
+                st.error(f"❌ Clear failed: {str(e)}")
+
+    # Add divider between RAG and Clear Chat History
+    st.divider()
+
     if st.button("🗑️ Clear Chat History"):
         st.session_state.chat_history = []
         st.session_state.last_response = None
@@ -563,6 +663,13 @@ def _update_progress_display(placeholder, current_node):
         'rag_retriever': ('Retrieving from cache', 'Processing')
     }
 
+    # Only show RAG-related progress if RAG is enabled
+    use_rag_chain = st.session_state.get('use_rag_chain', False)
+    if not use_rag_chain:
+        # Remove RAG-related entries when RAG is disabled
+        node_info = {k: v for k, v in node_info.items() if k !=
+                     'rag_retriever'}
+
     # Get current node info for spinner
     current_label, current_model = node_info.get(
         current_node, ('Processing', 'N/A'))
@@ -632,7 +739,7 @@ if st.session_state.get("last_response"):
             download_buttons(df)
     st.session_state.last_response = None
 
-if prompt := st.chat_input("Ask OCI Copilot..."):
+if prompt := st.chat_input("Ask CloudAgentra..."):
     append_chat("user", prompt)
     st.rerun()
 
@@ -644,6 +751,12 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
         # Handle confirmation response
         st.session_state['confirmation_response'] = user_input
         st.session_state['confirmation_required'] = False
+        # Continue with the graph execution
+    elif st.session_state.get('parameter_gathering_required') or st.session_state.get('compartment_selection_required'):
+        # Handle parameter selection response
+        st.session_state['parameter_selection_response'] = user_input
+        st.session_state['parameter_gathering_required'] = False
+        st.session_state['compartment_selection_required'] = False
         # Continue with the graph execution
     else:
         # Reset previous response when new query is submitted
@@ -674,7 +787,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                 "db_path": ".oci_agent.sqlite",
                 "chat_history": [msg for role, msg in st.session_state.chat_history],
                 # Add toggle state
-                "use_rag_chain": st.session_state.get('use_rag_chain', True),
+                "use_rag_chain": st.session_state.get('use_rag_chain', False),
                 "plan": None,
                 "plan_error": None,
                 "plan_valid": False,
@@ -687,6 +800,11 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                 "confirmation_required": st.session_state.get('confirmation_required', False),
                 "confirmation_response": st.session_state.get('confirmation_response'),
                 "pending_plan": st.session_state.get('pending_plan'),
+                # Add parameter gathering state
+                "parameter_gathering_required": st.session_state.get('parameter_gathering_required', False),
+                "parameter_selection_response": st.session_state.get('parameter_selection_response'),
+                "compartment_selection_required": st.session_state.get('compartment_selection_required', False),
+                "compartment_data": st.session_state.get('compartment_data', []),
             }
 
             final_state = {}

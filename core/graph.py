@@ -30,13 +30,14 @@ def build_graph():
     # Set the entry point
     graph.set_entry_point("supervisor")
 
-    # 1. Supervisor routes to normalizer, presentation, or codegen (for retries)
+    # 1. Supervisor routes to normalizer, presentation, planner, or codegen (for retries)
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state.get("next_step", "normalizer"),
         {
             "normalizer": "normalizer",
             "presentation_node": "presentation_node",
+            "planner": "planner",  # For planner retries
             "codegen": "codegen"  # For retry loops
         }
     )
@@ -47,7 +48,8 @@ def build_graph():
         lambda state: state.get("next_step"),
         {
             "rag_retriever": "rag_retriever",
-            "planner": "planner"
+            "planner": "planner",
+            "presentation_node": "presentation_node"  # For non-executable queries
         }
     )
 

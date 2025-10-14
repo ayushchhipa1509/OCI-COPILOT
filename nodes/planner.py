@@ -17,6 +17,12 @@ def planner_node(state: AgentState) -> dict:
     print("⚙️ ENHANCED PLANNER NODE - STARTING")
     print("*" * 60)
 
+    # Check if this is a sub-task for parameter gathering
+    sub_task = state.get("sub_task")
+    if sub_task == "list_compartments":
+        print("🔄 Planner: Handling sub-task - list_compartments")
+        return _handle_compartment_listing(state)
+
     normalized_query = state.get(
         "normalized_query", "") or state.get("user_input", "")
     call_llm_func = state.get("call_llm", default_call_llm)
@@ -45,6 +51,7 @@ def planner_node(state: AgentState) -> dict:
 
     # Step 2: Route based on execution type
     execution_type = analysis_result.get('execution_type')
+    print(f"🔍 DEBUG: Execution type detected: {execution_type}")
 
     if execution_type == "DIRECT_FETCH":
         print(f"\n⚡ Step 2: Using DIRECT_FETCH strategy...")
@@ -75,6 +82,7 @@ def _handle_direct_fetch(analysis_result: dict, state: dict, call_llm_func, star
 
         total_time = time.time() - start_time
         print(f"✅ Plan generated in {total_time:.2f}s (template only)")
+        print(f"🔍 DEBUG: Full plan: {plan}")
         print("*" * 60)
         return {
             "plan": plan,
@@ -114,13 +122,31 @@ def _handle_multi_step(normalized_query: str, analysis_result: dict, state: dict
     try:
         # Use Pro model for complex multi-step planning
         print("🧠 Using Pro model for complex multi-step planning")
-        # Use codegen node config (Pro model) for complex reasoning
-        llm_output = call_llm_func(state, messages, 'codegen')
+        # Use planner node config for planning
+        llm_output = call_llm_func(state, messages, 'planner')
         llm_time = time.time() - llm_start
         print(f"✅ LLM planning completed in {llm_time:.2f}s")
 
         response_str = str(llm_output).strip()
-        plan = json.loads(response_str)
+        print(f"🔍 DEBUG: LLM response length: {len(response_str)}")
+        print(f"🔍 DEBUG: LLM response preview: {response_str[:200]}...")
+        print(f"🔍 DEBUG: Full LLM response: {response_str}")
+
+        # Try to extract JSON from response if it contains extra text
+        try:
+            plan = json.loads(response_str)
+        except json.JSONDecodeError:
+            print("⚠️ JSON parsing failed, trying to extract JSON from response...")
+            # Try to find JSON in the response
+            import re
+            json_match = re.search(r'\{.*\}', response_str, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                print(f"🔍 DEBUG: Extracted JSON: {json_str}")
+                plan = json.loads(json_str)
+            else:
+                raise json.JSONDecodeError(
+                    "No JSON found in response", response_str, 0)
         plan = _enforce_all_compartments(plan)
 
         # Apply safety flags
@@ -222,13 +248,32 @@ def _handle_llm_fallback(normalized_query: str, analysis_result: dict, state: di
     try:
         # Use Pro model for complex fallback planning
         print("🧠 Using Pro model for fallback planning")
-        # Use codegen node config (Pro model) for complex reasoning
-        llm_output = call_llm_func(state, messages, 'codegen')
+        # Use planner node config for planning
+        llm_output = call_llm_func(state, messages, 'planner')
         llm_time = time.time() - llm_start
         print(f"✅ LLM fallback completed in {llm_time:.2f}s")
 
         response_str = str(llm_output).strip()
-        plan = json.loads(response_str)
+        print(f"🔍 DEBUG: LLM fallback response length: {len(response_str)}")
+        print(
+            f"🔍 DEBUG: LLM fallback response preview: {response_str[:200]}...")
+        print(f"🔍 DEBUG: Full LLM fallback response: {response_str}")
+
+        # Try to extract JSON from response if it contains extra text
+        try:
+            plan = json.loads(response_str)
+        except json.JSONDecodeError:
+            print("⚠️ JSON parsing failed, trying to extract JSON from response...")
+            # Try to find JSON in the response
+            import re
+            json_match = re.search(r'\{.*\}', response_str, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                print(f"🔍 DEBUG: Extracted JSON: {json_str}")
+                plan = json.loads(json_str)
+            else:
+                raise json.JSONDecodeError(
+                    "No JSON found in response", response_str, 0)
         plan = _enforce_all_compartments(plan)
 
         # Apply safety flags
@@ -287,16 +332,29 @@ def _convert_template_to_plan(template_plan: dict, analysis_result: dict) -> dic
     resource = analysis_result.get('primary_resource')
     oci_service = analysis_result.get('oci_service', 'compute')
     api_method = template_plan.get('api_method')
+    action = analysis_result.get('action', '')
 
-    plan = {
-        "action": api_method,
-        "service": oci_service,
-        "params": {
-            "compartment_id": "${oci_creds.tenancy}",
-            "all_compartments": True
-        },
-        "safety_tier": "safe"
-    }
+    # For CREATE operations, don't set default compartment_id - let parameter gathering handle it
+    if action == 'create':
+        plan = {
+            "action": api_method,
+            "service": oci_service,
+            "params": {
+                # Don't set compartment_id for create operations - let parameter gathering handle it
+            },
+            "safety_tier": "destructive"
+        }
+    else:
+        # For LIST operations, use default compartment_id
+        plan = {
+            "action": api_method,
+            "service": oci_service,
+            "params": {
+                "compartment_id": "${oci_creds.tenancy}",
+                "all_compartments": True
+            },
+            "safety_tier": "safe"
+        }
 
     # Add filtering if needed
     if template_plan.get('requires_filtering'):
@@ -350,8 +408,36 @@ def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
             print(f"⚠️ Missing parameters: {missing_params}")
         else:
             print(f"✅ All required parameters present")
+
+        print(f"🔍 DEBUG: Plan params: {plan.get('params', {})}")
+        print(f"🔍 DEBUG: Required params: {required_params}")
+        print(f"🔍 DEBUG: Missing params: {missing_params}")
     else:
         print(f"✅ Safe action: {action}")
         plan['safety_tier'] = 'safe'
 
     return plan
+
+
+def _handle_compartment_listing(state: AgentState) -> dict:
+    """Handle sub-task to list compartments for parameter selection."""
+    print("🔄 Planner: Creating plan to list compartments")
+
+    # Create a simple plan to list compartments
+    compartment_plan = {
+        "action": "list_compartments",
+        "service": "identity",
+        "params": {
+            "compartment_id": "${oci_creds.tenancy}",
+            "all_compartments": True
+        },
+        "safety_tier": "safe"
+    }
+
+    return {
+        "plan": compartment_plan,
+        "last_node": "planner",
+        "sub_task_result": "compartment_listing",
+        "pending_plan": state.get("pending_plan"),
+        "missing_parameters": state.get("missing_parameters", [])
+    }

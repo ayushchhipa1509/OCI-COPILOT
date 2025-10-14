@@ -123,6 +123,25 @@ for compartment in all_compartments:
         continue
 ```
 
+### 7. Get Cloud Guard Configuration
+
+```python
+# Get Cloud Guard configuration for the tenancy (root compartment)
+tenancy_id = oci_config['tenancy']
+
+try:
+    # CORRECT: Use get_configuration method (not list_configurations)
+    response = cloudguard_client.get_configuration(compartment_id=tenancy_id)
+
+    # The response.data is a single configuration object, not a list
+    # No loop needed - append directly to results
+    results.append(to_dict(response.data))
+
+except oci.exceptions.ServiceError as e:
+    # Handle cases where Cloud Guard is not enabled or permission issues
+    pass
+```
+
 ## Key Points
 
 - Use `lifecycle_state` parameter for filtering by state
@@ -130,5 +149,4 @@ for compartment in all_compartments:
 - Always implement pagination for all list operations
 - Handle service errors gracefully with try/except blocks
 - Cloud Guard resources are compartment-scoped
-
-
+- **CRITICAL:** Use `get_configuration()` for Cloud Guard status, not `list_configurations()`

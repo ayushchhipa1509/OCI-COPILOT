@@ -26,6 +26,14 @@ def presentation_node(state: AgentState) -> dict:
     if state.get("action_cancelled"):
         return _handle_action_cancellation(state)
 
+    # Handle parameter gathering
+    if state.get("parameter_gathering_required"):
+        return _handle_parameter_gathering(state)
+
+    # Handle compartment listing for parameter selection
+    if state.get("compartment_listing_complete"):
+        return _handle_compartment_selection(state)
+
     data_source = state.get("data_source", "live_api")
     user_query = state.get("user_input", "")
     execution_result = state.get("execution_result", {})
@@ -329,4 +337,155 @@ No changes have been made to your OCI environment.
             "summary": cancellation_message,
             "format": "chat"
         }
+    }
+
+
+def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None) -> dict:
+    """Parse user input to extract parameter values."""
+    selected_params = {}
+
+    # Check if user selected a number for compartment
+    if compartment_data and user_input.strip().isdigit():
+        selection_num = int(user_input.strip())
+        if 1 <= selection_num <= len(compartment_data):
+            selected_compartment = compartment_data[selection_num - 1]
+            selected_params['compartment_id'] = selected_compartment.get('id')
+            print(
+                f"🔄 User selected compartment #{selection_num}: {selected_compartment.get('name')}")
+            return selected_params
+
+    # Simple parsing: look for "param_name: value" patterns
+    lines = user_input.split('\n')
+    for line in lines:
+        line = line.strip()
+        if ':' in line:
+            key, value = line.split(':', 1)
+            key = key.strip()
+            value = value.strip()
+            if key in missing_params:
+                selected_params[key] = value
+
+    return selected_params
+
+
+def _handle_parameter_gathering(state: AgentState) -> dict:
+    """Handle parameter gathering for deployment operations."""
+    pending_plan = state.get("pending_plan", {})
+    missing_params = state.get("missing_parameters", [])
+    action = pending_plan.get("action", "unknown action")
+    service = pending_plan.get("service", "unknown service")
+
+    # Build parameter gathering message
+    gathering_message = f"""
+🔧 **PARAMETER GATHERING REQUIRED**
+
+I need additional information to complete your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
+
+**Missing Parameters:**
+{', '.join(missing_params)}
+
+Please provide the missing information:
+"""
+
+    # Add specific guidance based on missing parameters
+    if "compartment_id" in missing_params:
+        gathering_message += """
+**For Compartment Selection:**
+Please provide the compartment OCID where you want to create the resource.
+You can find compartment OCIDs by running: "list compartments"
+"""
+
+    if "shape" in missing_params:
+        gathering_message += """
+**For Instance Shape:**
+Please provide the shape name (e.g., "VM.Standard.E2.1.Micro").
+You can find available shapes by running: "list shapes"
+"""
+
+    if "image_id" in missing_params:
+        gathering_message += """
+**For Instance Image:**
+Please provide the image OCID (e.g., "ocid1.image.oc1...").
+You can find available images by running: "list images"
+"""
+
+    if "subnet_id" in missing_params:
+        gathering_message += """
+**For Subnet Selection:**
+Please provide the subnet OCID where you want to create the resource.
+You can find subnet OCIDs by running: "list subnets"
+"""
+
+    gathering_message += """
+**Example Response:**
+compartment_id: ocid1.compartment.oc1..your_compartment_ocid
+shape: VM.Standard.E2.1.Micro
+image_id: ocid1.image.oc1..your_image_ocid
+"""
+
+    return {
+        "presentation": {
+            "summary": gathering_message,
+            "format": "chat",
+            "parameter_gathering_required": True,
+            "missing_parameters": missing_params,
+            "pending_plan": pending_plan
+        }
+    }
+
+
+def _handle_compartment_selection(state: AgentState) -> dict:
+    """Handle compartment selection with numbered list."""
+    pending_plan = state.get("pending_plan", {})
+    missing_params = state.get("missing_parameters", [])
+    action = pending_plan.get("action", "unknown action")
+    service = pending_plan.get("service", "unknown service")
+
+    # Get the execution result (compartment list)
+    execution_result = state.get("execution_result", {})
+    compartment_data = execution_result.get("data", [])
+
+    if not compartment_data:
+        # Fallback if no compartments found
+        selection_message = f"""
+🔧 **COMPARTMENT SELECTION REQUIRED**
+
+I need to know which compartment to use for your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
+
+Unfortunately, I couldn't retrieve the list of compartments. Please provide the compartment OCID manually:
+
+**Example Response:**
+compartment_id: ocid1.compartment.oc1..your_compartment_ocid
+"""
+    else:
+        # Create numbered list of compartments
+        selection_message = f"""
+🔧 **COMPARTMENT SELECTION REQUIRED**
+
+I need to know which compartment to use for your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
+
+**Available Compartments:**
+"""
+
+        for i, compartment in enumerate(compartment_data, 1):
+            name = compartment.get('name', 'Unknown')
+            ocid = compartment.get('id', 'Unknown OCID')
+            selection_message += f"{i}. **{name}** (`{ocid}`)\n"
+
+        selection_message += """
+**Please select by number or provide compartment details:**
+- Type the number (e.g., `1`) to select a compartment
+- Or provide: `compartment_id: ocid1.compartment.oc1..your_ocid`
+"""
+
+    return {
+        "presentation": {
+            "summary": selection_message,
+            "format": "chat",
+            "compartment_selection_required": True,
+            "compartment_data": compartment_data,
+            "missing_parameters": missing_params,
+            "pending_plan": pending_plan
+        },
+        "compartment_data": compartment_data  # Store in state for supervisor access
     }

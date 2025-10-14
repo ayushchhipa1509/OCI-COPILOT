@@ -176,4 +176,40 @@ except oci.exceptions.ServiceError:
 - Handle service errors gracefully with try/except blocks
 - Buckets are compartment-scoped
 
+### 5. Create Action: `create_bucket`
 
+When the plan action is `create_bucket`, you must generate code to create an Object Storage bucket. The parameters will be provided in the plan. This code incorporates security best practices from the CIS OCI Foundations Benchmark.
+
+```python
+from oci.util import to_dict
+
+# Create Object Storage client
+objectstorage_client = get_client('objectstorage', oci_config)
+namespace = objectstorage_client.get_namespace().data
+
+# Extract details from the plan's params
+bucket_name = plan['params'].get('name')
+compartment_id = plan['params'].get('compartment_id')
+
+# Define the details for the new bucket
+create_bucket_details = oci.object_storage.models.CreateBucketDetails(
+    name=bucket_name,
+    compartment_id=compartment_id,
+    # CIS Benchmark 5.1.1: Ensure buckets are not publicly visible by default
+    public_access_type='NoPublicAccess',
+    storage_tier='Standard',
+    # CIS Benchmark 5.1.3: Ensure versioning is enabled to protect against overwrites and deletions
+    versioning='Enabled'
+    # NOTE: CIS Benchmark 5.1.2 recommends using a Customer-Managed Key (CMK) for encryption.
+    # This can be added via the 'kms_key_id' parameter if a key OCID is provided.
+)
+
+# Create the bucket
+created_bucket_response = objectstorage_client.create_bucket(
+    namespace_name=namespace,
+    create_bucket_details=create_bucket_details
+)
+
+# Append the created resource details (as a dictionary) to the results
+results.append(to_dict(created_bucket_response.data))
+```

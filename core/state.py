@@ -62,3 +62,24 @@ class AgentState(TypedDict, total=False):
     timings: Optional[Dict[str, float]]  # Per-node execution times
     planning_time: Optional[float]  # Time spent in planner
     total_execution_time: Optional[float]  # Total query processing time
+
+    # --- Parameter Gathering & Interactive Deployment ---
+    parameter_gathering_required: bool
+    parameter_selection_response: Optional[str]
+    missing_parameters: Optional[List[str]]
+    pending_plan: Optional[Dict[str, Any]]
+    gathering_type: Optional[str]
+
+    # --- Compartment Selection ---
+    compartment_selection_required: bool
+    compartment_data: Optional[List[Dict[str, Any]]]
+    auto_fetch_required: bool
+    sub_task: Optional[str]
+    sub_task_result: Optional[str]
+
+    # --- Confirmation & Safety ---
+    confirmation_required: bool
+    confirmation_response: Optional[str]
+    confirmation_type: Optional[str]
+    action_cancelled: bool
+    cancellation_reason: Optional[str]
