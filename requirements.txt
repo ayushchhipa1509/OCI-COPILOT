@@ -11,6 +11,7 @@ langchain-openai
 langchain-google-genai
 langchain-groq
 langchain-anthropic
+langchain-cohere
 langgraph
 jsonpatch
 jsonpointer

@@ -34,6 +34,42 @@ from typing import List, Dict, Any, Optional
 # ==============================================================================
 
 
+def validate_llm_credentials(provider):
+    """Validate if API key is provided for the selected LLM provider."""
+    api_keys = {
+        "gemini": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        "openai": ["OPENAI_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY"],
+        "groq": ["GROQ_API_KEY"],
+        "deepseek": ["DEEPSEEK_API_KEY"],
+        "mistral": ["MISTRAL_API_KEY"],
+        "cohere": ["COHERE_API_KEY"]
+    }
+
+    required_keys = api_keys.get(provider, [])
+    for key in required_keys:
+        if os.getenv(key):
+            return True, None
+
+    return False, f"Please provide API key for {provider.upper()}"
+
+
+def validate_oci_credentials():
+    """Validate if OCI credentials are provided."""
+    required_creds = ["OCI_TENANCY", "OCI_USER",
+                      "OCI_FINGERPRINT", "OCI_KEY_FILE"]
+    missing_creds = []
+
+    for cred in required_creds:
+        if not os.getenv(cred):
+            missing_creds.append(cred)
+
+    if missing_creds:
+        return False, f"Missing OCI credentials: {', '.join(missing_creds)}"
+
+    return True, None
+
+
 def test_api_connection(provider):
     """Test API connection for the selected provider."""
     import time
@@ -56,6 +92,15 @@ def test_api_connection(provider):
         elif provider == "groq":
             from core.llm_manager import _call_groq
             response = _call_groq(test_messages)
+        elif provider == "deepseek":
+            from core.llm_manager import _call_deepseek
+            response = _call_deepseek(test_messages)
+        elif provider == "mistral":
+            from core.llm_manager import _call_mistral
+            response = _call_mistral(test_messages)
+        elif provider == "cohere":
+            from core.llm_manager import _call_cohere
+            response = _call_cohere(test_messages)
         else:
             return {"success": False, "error": f"Unknown provider: {provider}"}
 
@@ -273,7 +318,10 @@ with st.sidebar:
             "Google (Gemini 2.5 Pro)": "gemini",
             "OpenAI (GPT-4)": "openai",
             "Groq (Llama 3)": "groq",
-            "Anthropic (Claude)": "anthropic"
+            "Anthropic (Claude)": "anthropic",
+            "DeepSeek (Coder)": "deepseek",
+            "Mistral (Nemo)": "mistral",
+            "Cohere (Command)": "cohere"
         }
 
         display_name = st.selectbox(
@@ -325,15 +373,52 @@ with st.sidebar:
             if api_key:
                 os.environ['ANTHROPIC_API_KEY'] = api_key
 
+        elif selected_provider == "deepseek":
+            api_key = st.text_input(
+                "DeepSeek API Key",
+                value=os.getenv('DEEPSEEK_API_KEY', ''),
+                type="password",
+                help="Get your API key from DeepSeek Platform"
+            )
+            if api_key:
+                os.environ['DEEPSEEK_API_KEY'] = api_key
+
+        elif selected_provider == "mistral":
+            api_key = st.text_input(
+                "Mistral API Key",
+                value=os.getenv('MISTRAL_API_KEY', ''),
+                type="password",
+                help="Get your API key from Mistral AI Platform"
+            )
+            if api_key:
+                os.environ['MISTRAL_API_KEY'] = api_key
+
+        elif selected_provider == "cohere":
+            api_key = st.text_input(
+                "Cohere API Key",
+                value=os.getenv('COHERE_API_KEY', ''),
+                type="password",
+                help="Get your API key from Cohere Platform"
+            )
+            if api_key:
+                os.environ['COHERE_API_KEY'] = api_key
+
         # API Test Section
         if st.button("🧪 Test API Connection"):
-            test_result = test_api_connection(selected_provider)
-            if test_result["success"]:
-                st.success(f"✅ {selected_provider.upper()} API working!")
-                st.info(f"Response time: {test_result['response_time']:.2f}s")
-            else:
+            # Check if API key is provided
+            is_valid, error_msg = validate_llm_credentials(selected_provider)
+            if not is_valid:
                 st.error(
-                    f"❌ {selected_provider.upper()} API failed: {test_result['error']}")
+                    f"⚠️ **API Key Required**\n\n{error_msg}\n\nPlease provide your API key above to test the connection.")
+            else:
+                test_result = test_api_connection(selected_provider)
+                if test_result["success"]:
+                    st.success(f"✅ {selected_provider.upper()} API working!")
+                    st.info(
+                        f"Response time: {test_result['response_time']:.2f}s")
+                else:
+                    st.error(
+                        f"❌ {selected_provider.upper()} API failed: {test_result['error']}")
 
     st.divider()
     # Collapsible OCI Configuration Section
@@ -562,6 +647,33 @@ with st.sidebar:
     # Add divider between RAG and Clear Chat History
     st.divider()
 
+    # Credential Status Section
+    with st.expander("🔐 Credential Status", expanded=False):
+        # Check LLM credentials
+        llm_provider = st.session_state.get(
+            'llm_preference', {}).get('provider', 'gemini')
+        llm_valid, llm_error = validate_llm_credentials(llm_provider)
+        oci_valid, oci_error = validate_oci_credentials()
+
+        if llm_valid:
+            st.success(f"✅ LLM API Key ({llm_provider.upper()}) - Ready")
+        else:
+            st.error(f"❌ LLM API Key ({llm_provider.upper()}) - Missing")
+            st.caption(llm_error)
+
+        if oci_valid:
+            st.success("✅ OCI Credentials - Ready")
+        else:
+            st.error("❌ OCI Credentials - Missing")
+            st.caption(oci_error)
+
+        if llm_valid and oci_valid:
+            st.success(
+                "🎉 All credentials ready! You can start using CloudAgentra.")
+        else:
+            st.warning(
+                "⚠️ Please configure missing credentials in the sections above.")
+
     if st.button("🗑️ Clear Chat History"):
         st.session_state.chat_history = []
         st.session_state.last_response = None
@@ -776,6 +888,33 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
         # Show initial progress immediately
         progress_placeholder.markdown(
             "```\n🤖 Processing Your Request\n" + "="*60 + "\n⏳ Initializing...\n" + "="*60 + "\n```")
+
+        # Validate credentials before processing
+        llm_provider = st.session_state.get(
+            'llm_preference', {}).get('provider', 'gemini')
+        llm_valid, llm_error = validate_llm_credentials(llm_provider)
+        oci_valid, oci_error = validate_oci_credentials()
+
+        # Show validation warnings
+        if not llm_valid:
+            st.error(
+                f"⚠️ **LLM API Key Required**\n\n{llm_error}\n\nPlease provide your API key in the sidebar to continue.")
+            st.info(f"**How to get {llm_provider.upper()} API Key:**\n"
+                    f"- Visit the {llm_provider.upper()} platform\n"
+                    f"- Create an account and generate an API key\n"
+                    f"- Paste the key in the sidebar")
+            st.stop()
+
+        if not oci_valid:
+            st.error(
+                f"⚠️ **OCI Credentials Required**\n\n{oci_error}\n\nPlease provide your OCI credentials in the sidebar to continue.")
+            st.info("**How to get OCI Credentials:**\n"
+                    "- Log into Oracle Cloud Console\n"
+                    "- Go to Identity > Users > Your User\n"
+                    "- Generate API Key and download the private key\n"
+                    "- Get your Tenancy OCID, User OCID, and Fingerprint\n"
+                    "- Fill in the OCI Configuration section in the sidebar")
+            st.stop()
 
         with st.spinner("Processing..."):
             initial_state: AgentState = {

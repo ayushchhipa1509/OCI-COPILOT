@@ -8,6 +8,9 @@ from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_anthropic import ChatAnthropic
+from langchain_cohere import ChatCohere
+import requests
+import json
 
 # ============================================================================
 # NODE-SPECIFIC MODEL CONFIGURATION (Multi-Provider)
@@ -40,6 +43,18 @@ PROVIDER_MODELS = {
     'groq': {
         'fast': 'llama-3.3-70b-versatile',
         'powerful': 'llama-3.3-70b-versatile'  # Groq has limited models
+    },
+    'deepseek': {
+        'fast': 'deepseek-coder-6.7b-instruct',
+        'powerful': 'deepseek-coder-33b-instruct'
+    },
+    'mistral': {
+        'fast': 'mistral-7b-instruct',
+        'powerful': 'mistral-nemo-12b-instruct'
+    },
+    'cohere': {
+        'fast': 'command-light',
+        'powerful': 'command-r-plus'
     }
 }
 
@@ -102,6 +117,96 @@ def _call_anthropic(messages, model_name=None):
     return response.content
 
 
+def _call_deepseek(messages, model_name=None):
+    api_key = os.getenv('DEEPSEEK_API_KEY')
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY not set")
+
+    model_name = model_name or "deepseek-coder-33b-instruct"
+    print(f"   Using DeepSeek model: {model_name}")
+
+    # DeepSeek API call
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Convert messages to DeepSeek format
+    deepseek_messages = []
+    for msg in messages:
+        if msg['role'] == 'system':
+            deepseek_messages.append(
+                {"role": "system", "content": msg['content']})
+        elif msg['role'] == 'user':
+            deepseek_messages.append(
+                {"role": "user", "content": msg['content']})
+
+    data = {
+        "model": model_name,
+        "messages": deepseek_messages,
+        "temperature": 0.1,
+        "max_tokens": 4000
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    result = response.json()
+    return result['choices'][0]['message']['content']
+
+
+def _call_mistral(messages, model_name=None):
+    api_key = os.getenv('MISTRAL_API_KEY')
+    if not api_key:
+        raise ValueError("MISTRAL_API_KEY not set")
+
+    model_name = model_name or "mistral-nemo-12b-instruct"
+    print(f"   Using Mistral model: {model_name}")
+
+    # Mistral API call
+    url = "https://api.mistral.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Convert messages to Mistral format
+    mistral_messages = []
+    for msg in messages:
+        if msg['role'] == 'system':
+            mistral_messages.append(
+                {"role": "system", "content": msg['content']})
+        elif msg['role'] == 'user':
+            mistral_messages.append(
+                {"role": "user", "content": msg['content']})
+
+    data = {
+        "model": model_name,
+        "messages": mistral_messages,
+        "temperature": 0.1,
+        "max_tokens": 4000
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    result = response.json()
+    return result['choices'][0]['message']['content']
+
+
+def _call_cohere(messages, model_name=None):
+    api_key = os.getenv('COHERE_API_KEY')
+    if not api_key:
+        raise ValueError("COHERE_API_KEY not set")
+
+    model_name = model_name or "command-r-plus"
+    print(f"   Using Cohere model: {model_name}")
+
+    # Use LangChain Cohere integration
+    llm = ChatCohere(api_key=api_key, model=model_name, temperature=0.1)
+    response = llm.invoke(_to_lc_messages(messages))
+    return response.content
+
+
 def call_llm(state, messages, node_name='node', use_fast_model=False):
     """
     Call LLM with node-specific model selection across all providers.
@@ -145,7 +250,8 @@ def call_llm(state, messages, node_name='node', use_fast_model=False):
     print(f"🎯 Using {selected_provider} model: {specific_model}")
 
     # All available providers with priority order
-    all_providers = ['gemini', 'openai', 'anthropic', 'groq']
+    all_providers = ['gemini', 'openai', 'anthropic',
+                     'groq', 'deepseek', 'mistral', 'cohere']
 
     # Create fallback order: selected provider first, then others
     providers_to_try = [selected_provider]
@@ -178,6 +284,12 @@ def call_llm(state, messages, node_name='node', use_fast_model=False):
                     model_to_use = 'claude-3-5-haiku-20241022' if node_model_type == 'fast' else 'claude-3-5-sonnet-20241022'
                 elif current_provider == 'groq':
                     model_to_use = 'llama-3.3-70b-versatile'
+                elif current_provider == 'deepseek':
+                    model_to_use = 'deepseek-coder-6.7b-instruct' if node_model_type == 'fast' else 'deepseek-coder-33b-instruct'
+                elif current_provider == 'mistral':
+                    model_to_use = 'mistral-7b-instruct' if node_model_type == 'fast' else 'mistral-nemo-12b-instruct'
+                elif current_provider == 'cohere':
+                    model_to_use = 'command-light' if node_model_type == 'fast' else 'command-r-plus'
 
             print(f"   Using {current_provider} model: {model_to_use}")
 
@@ -190,6 +302,12 @@ def call_llm(state, messages, node_name='node', use_fast_model=False):
                 result = _call_anthropic(messages, model_name=model_to_use)
             elif current_provider == 'groq':
                 result = _call_groq(messages, model_name=model_to_use)
+            elif current_provider == 'deepseek':
+                result = _call_deepseek(messages, model_name=model_to_use)
+            elif current_provider == 'mistral':
+                result = _call_mistral(messages, model_name=model_to_use)
+            elif current_provider == 'cohere':
+                result = _call_cohere(messages, model_name=model_to_use)
 
             elapsed = time.time() - start_time
             print(f"✅ {node_name} completed in {elapsed:.2f}s")
