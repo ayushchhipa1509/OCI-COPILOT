@@ -149,6 +149,43 @@ For **list with filtering** operations:
 }
 ```
 
+**Query**: "create 3 buckets with names ayush_1, ayush_2, ayush_3"
+**Intent**: resource=bucket, action=create, is_mutating=true, multiple=true
+
+```json
+{
+  "steps": [
+    {
+      "id": "step1",
+      "action": "create_bucket",
+      "service": "objectstorage",
+      "params": {
+        "name": "ayush_1"
+      }
+    },
+    {
+      "id": "step2",
+      "action": "create_bucket",
+      "service": "objectstorage",
+      "params": {
+        "name": "ayush_2"
+      }
+    },
+    {
+      "id": "step3",
+      "action": "create_bucket",
+      "service": "objectstorage",
+      "params": {
+        "name": "ayush_3"
+      }
+    }
+  ],
+  "requires_confirmation": true,
+  "missing_parameters": ["compartment_id"],
+  "safety_tier": "destructive"
+}
+```
+
 ## Output
 
 **CRITICAL: You MUST return ONLY valid JSON. No explanations, no markdown, no extra text.**

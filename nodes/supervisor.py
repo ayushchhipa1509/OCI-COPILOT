@@ -121,15 +121,60 @@ def supervisor_node(state: AgentState) -> dict:
     - Routes OCI operations to normalizer for processing
     - Handles exception recovery from verifier
     """
+    # Safety check: Prevent infinite loops
+    recursion_count = state.get('recursion_count', 0)
+    max_recursion = state.get('max_recursion', 20)
+
+    if recursion_count >= max_recursion:
+        print("🚨 RECURSION LIMIT REACHED - FORCING END")
+        return {
+            "next_step": "presentation_node",
+            "presentation": {
+                "summary": "I've reached the maximum processing limit. Please try a simpler request or restart the conversation.",
+                "format": "chat"
+            }
+        }
+
+    # Increment recursion counter
+    state["recursion_count"] = recursion_count + 1
+
     print("=" * 60)
     print("🧠 SUPERVISOR NODE - STARTING")
     print(f"Last node was: {state.get('last_node')}")
+    print(f"Recursion count: {recursion_count + 1}/{max_recursion}")
     print("=" * 60)
+
+    # Use memory context for intelligent routing
+    conversation_context = state.get("conversation_context", {})
+    user_preferences = state.get("user_preferences", {})
+    recent_actions = state.get("recent_actions", [])
+
+    print(
+        f"🧠 SUPERVISOR: Memory context loaded - Recent actions: {len(recent_actions)}")
+    print(f"🧠 SUPERVISOR: User preferences: {len(user_preferences)}")
+    print(f"🧠 SUPERVISOR: Conversation context: {len(conversation_context)}")
 
     # If this is the start of the graph, route directly to normalizer
     if state.get("last_node") is None:
         print("🕵️ Entry point: Routing to normalizer for query analysis")
         return {"next_step": "normalizer"}
+
+    # Clear any pending state when a new query comes in (before normalizer)
+    if state.get("pending_plan") and state.get("last_node") == "normalizer":
+        print("🕵️ Supervisor: New query detected while pending plan exists, clearing pending state")
+        return {
+            "next_step": "normalizer",  # Send back to normalizer with cleared state
+            "pending_plan": None,
+            "parameter_gathering_required": False,
+            "compartment_selection_required": False,
+            "confirmation_required": False,
+            "missing_parameters": None
+        }
+
+    # If called from normalizer with no pending state, route to planner
+    if state.get("last_node") == "normalizer" and not state.get("pending_plan"):
+        print("🕵️ Supervisor: New query from normalizer, routing to planner")
+        return {"next_step": "planner"}
 
     # If called from the planner, check for confirmation requirements or failures
     if state.get("last_node") == "planner":
@@ -145,26 +190,72 @@ def supervisor_node(state: AgentState) -> dict:
                 "retry_reason": "Plan generation failed"
             }
 
-        # Check for missing parameters first
-        missing_params = plan.get("missing_parameters", [])
-        print(f"🔍 DEBUG Supervisor: Plan keys: {list(plan.keys())}")
-        print(
-            f"🔍 DEBUG Supervisor: Missing params from plan: {missing_params}")
-        if missing_params:
-            print(
-                f"🕵️ Supervisor: Missing parameters detected: {missing_params}")
+        # Use LLM to understand if parameters are actually missing
+        user_input = state.get("user_input", "")
+        call_llm_func = state.get("call_llm", default_call_llm)
+        print(f"🕵️ Supervisor: Using LLM to analyze parameter completeness")
 
-            # Check if we can automatically fetch some parameters
-            if "compartment_id" in missing_params:
-                print("🕵️ Supervisor: Can auto-fetch compartments, triggering sub-task")
-                return {
-                    "next_step": "planner",
-                    "sub_task": "list_compartments",
-                    "pending_plan": plan,
-                    "missing_parameters": missing_params,
-                    "auto_fetch_required": True
-                }
+        # Create LLM prompt to analyze if all required parameters are provided
+        parameter_analysis_prompt = f"""
+You are an OCI parameter analyzer. Analyze if the user has provided all necessary parameters for the operation.
+
+User Query: "{user_input}"
+Plan Action: {plan.get('action', 'unknown')}
+Plan Service: {plan.get('service', 'unknown')}
+Plan Parameters: {plan.get('params', {})}
+
+Determine if the user has provided all necessary parameters in their query. Look for:
+- Compartment IDs (any format: ocid1.compartment.oc1.., compartment names, etc.)
+- Resource names
+- Any other required parameters
+
+Respond with JSON:
+{{
+    "parameters_complete": true/false,
+    "missing_parameters": ["list", "of", "missing", "params"],
+    "extracted_parameters": {{"param_name": "value"}},
+    "reasoning": "explanation of analysis"
+}}
+"""
+
+        try:
+            response = call_llm_func(
+                state, [{"role": "user", "content": parameter_analysis_prompt}], "supervisor")
+            import json
+            analysis = json.loads(response)
+
+            print(f"🧠 LLM Parameter Analysis: {analysis}")
+
+            if not analysis.get("parameters_complete", True):
+                missing_params = analysis.get("missing_parameters", [])
+                extracted_params = analysis.get("extracted_parameters", {})
+
+                print(
+                    f"🕵️ Supervisor: LLM detected missing parameters: {missing_params}")
+                print(
+                    f"🕵️ Supervisor: LLM extracted parameters: {extracted_params}")
+
+                # Update plan with extracted parameters
+                if extracted_params and "params" in plan:
+                    plan["params"].update(extracted_params)
+                    print(f"🕵️ Supervisor: Updated plan with extracted parameters")
+
+                if missing_params:
+                    return {
+                        "next_step": "presentation_node",
+                        "parameter_gathering_required": True,
+                        "missing_parameters": missing_params,
+                        "pending_plan": plan,
+                        "gathering_type": "parameter_selection"
+                    }
             else:
+                print(f"🕵️ Supervisor: LLM confirmed all parameters are provided")
+
+        except Exception as e:
+            print(f"🕵️ Supervisor: LLM parameter analysis failed: {e}")
+            # Fallback to original logic
+            missing_params = plan.get("missing_parameters", [])
+            if missing_params:
                 return {
                     "next_step": "presentation_node",
                     "parameter_gathering_required": True,
@@ -216,8 +307,9 @@ def supervisor_node(state: AgentState) -> dict:
 
         # Parse the user's parameter response
         compartment_data = state.get("compartment_data", [])
+        call_llm_func = state.get("call_llm", default_call_llm)
         selected_params = _parse_parameter_response(
-            user_input, missing_params, compartment_data)
+            user_input, missing_params, compartment_data, call_llm_func)
 
         print(f"🕵️ Supervisor: User selected parameters: {selected_params}")
 

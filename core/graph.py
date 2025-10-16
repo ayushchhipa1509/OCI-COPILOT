@@ -12,12 +12,17 @@ from nodes.executor import executor_node
 from nodes.rag_retriever import rag_retriever_node
 # Import the new presentation node
 from nodes.presentation_node import presentation_node
+# Import memory nodes
+from nodes.memory_context import memory_context_node
+from nodes.memory_manager import memory_manager_node
 
 
 def build_graph():
     graph = StateGraph(AgentState)
 
     # Define all nodes in the new architecture
+    # Memory loading (first)
+    graph.add_node("memory_context", memory_context_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("normalizer", normalizer_node)
     graph.add_node("rag_retriever", rag_retriever_node)
@@ -26,9 +31,14 @@ def build_graph():
     graph.add_node("verifier", verifier_node)
     graph.add_node("executor", executor_node)
     graph.add_node("presentation_node", presentation_node)
+    # Memory saving (last)
+    graph.add_node("memory_manager", memory_manager_node)
 
-    # Set the entry point
-    graph.set_entry_point("supervisor")
+    # Set the entry point to memory_context (loads memory first)
+    graph.set_entry_point("memory_context")
+
+    # 0. Memory context always goes to supervisor
+    graph.add_edge("memory_context", "supervisor")
 
     # 1. Supervisor routes to normalizer, presentation, planner, or codegen (for retries)
     graph.add_conditional_edges(
@@ -63,8 +73,17 @@ def build_graph():
         }
     )
 
-    # 4. Planner chain logic
-    graph.add_edge("planner", "codegen")
+    # 4. Planner chain logic - route through supervisor for parameter checking
+    graph.add_conditional_edges(
+        "planner",
+        lambda state: state.get("next_step", "supervisor"),
+        {
+            "supervisor": "supervisor",  # Check for missing parameters
+            "codegen": "codegen",  # Direct to codegen if no issues
+            "planner": "planner",  # Retry planner if needed
+            "presentation_node": "presentation_node"  # Error handling
+        }
+    )
     graph.add_edge("codegen", "verifier")
 
     # 5. Verifier is the control gate for execution
@@ -74,23 +93,33 @@ def build_graph():
         lambda state: state.get("next_step"),
         {
             "executor": "executor",
-            "supervisor": "supervisor"  # On failure, loop back to supervisor for review
+            "presentation_node": "presentation_node"  # On failure, show error to user
         }
     )
 
     # 6. Executor routes based on success/failure
     graph.add_conditional_edges(
         "executor",
-        lambda state: "supervisor" if state.get(
-            "execution_error") else "presentation_node",
+        # Always go to presentation (success or failure)
+        lambda state: "presentation_node",
         {
-            "presentation_node": "presentation_node",  # Success - go to presentation
-            "supervisor": "supervisor"  # Failure - loop back to supervisor for retry
+            "presentation_node": "presentation_node"  # Show results to user
         }
     )
 
-    # 7. Presentation node is the final step before END
-    graph.add_edge("presentation_node", END)
+    # 7. Presentation node routes to memory manager (save memory) or END
+    graph.add_conditional_edges(
+        "presentation_node",
+        lambda state: "memory_manager" if state.get(
+            "memory_saved") is None else "END",
+        {
+            "memory_manager": "memory_manager",
+            "END": END
+        }
+    )
+
+    # 8. Memory manager saves memory and ends the turn
+    graph.add_edge("memory_manager", END)
 
     # Compile the final, executable graph
     return graph.compile()

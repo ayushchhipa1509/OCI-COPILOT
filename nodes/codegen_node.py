@@ -149,9 +149,8 @@ def codegen_node(state: AgentState) -> dict:
         action = plan["action"]
         params = plan.get("params", {}) or {}
     elif "steps" in plan and isinstance(plan["steps"], list) and len(plan["steps"]) > 0:
-        first = plan["steps"][0]
-        action = first.get("action")
-        params = first.get("params", {}) or {}
+        # For multi-step plans, we need to generate code for each step
+        return _handle_multi_step_codegen(plan, state, call_llm_func)
     else:
         return {"plan": None, "plan_error": "Unsupported plan format for code generation.", "last_node": "codegen"}
 
@@ -354,10 +353,10 @@ def codegen_node(state: AgentState) -> dict:
             for key, value in params.items():
                 if isinstance(value, str):
                     oci_code = re.sub(
-                        f"params\.get\\(['\"]({key})['\"].*?\\)", f"'{value}'", oci_code)
+                        f"params\\.get\\(['\"]({key})['\"].*?\\)", f"'{value}'", oci_code)
                 else:
                     oci_code = re.sub(
-                        f"params\.get\\(['\"]({key})['\"].*?\\)", str(value), oci_code)
+                        f"params\\.get\\(['\"]({key})['\"].*?\\)", str(value), oci_code)
 
         # Safety tier default: safe for listing/getting, destructive otherwise
         safety_tier = "safe"
@@ -391,3 +390,258 @@ def codegen_node(state: AgentState) -> dict:
         fallback_plan = {"action": action or "unknown_action", "params": params or {}, "service": (
             action and action.split('_')[1]) if isinstance(action, str) else "unknown"}
         return {"plan": fallback_plan, "plan_error": f"Codegen LLM failed: {e}", "last_node": "codegen"}
+
+
+def _handle_multi_step_codegen(plan: dict, state: AgentState, call_llm_func) -> dict:
+    """Handle code generation for multi-step plans with optimization for similar actions."""
+    print("🔄 Generating code for multi-step plan...")
+
+    steps = plan.get('steps', [])
+
+    # Check if all steps are similar actions (optimization opportunity)
+    if _are_steps_similar(steps):
+        print("🚀 Optimizing: All steps are similar actions, generating efficient batch code...")
+        return _generate_optimized_batch_code(steps, state, call_llm_func)
+    else:
+        print("🔄 Generating individual code for each step...")
+        return _generate_individual_step_code(steps, state, call_llm_func)
+
+
+def _are_steps_similar(steps: list) -> bool:
+    """Check if all steps are similar actions that can be optimized."""
+    if len(steps) < 2:
+        return False
+
+    # Get the first step as reference
+    first_action = steps[0].get('action')
+    first_service = steps[0].get('service')
+
+    # Check if all steps have the same action and service
+    for step in steps[1:]:
+        if step.get('action') != first_action or step.get('service') != first_service:
+            return False
+
+    # Check if it's a batchable action (create, delete, etc.)
+    batchable_actions = ['create_bucket', 'delete_bucket',
+                         'create_volume', 'create_instance']
+    return first_action in batchable_actions
+
+
+def _generate_optimized_batch_code(steps: list, state: AgentState, call_llm_func) -> dict:
+    """Generate optimized batch code for similar actions."""
+    first_step = steps[0]
+    action = first_step.get('action')
+    service = first_step.get('service')
+
+    # Extract all the resource names/parameters
+    resource_names = []
+    for step in steps:
+        params = step.get('params', {})
+        if 'name' in params:
+            resource_names.append(params['name'])
+        elif 'bucket_name' in params:
+            resource_names.append(params['bucket_name'])
+        elif 'display_name' in params:
+            resource_names.append(params['display_name'])
+
+    # Create optimized prompt for batch operations
+    user_query = state.get("user_input", "")
+
+    if action == 'create_bucket':
+        optimized_prompt = f"""
+Generate optimized OCI code to create multiple buckets in a single operation.
+
+Action: {action}
+Service: {service}
+Resource Names: {resource_names}
+Compartment ID: {first_step.get('params', {}).get('compartment_id', 'PLACEHOLDER')}
+
+CRITICAL REQUIREMENTS - Follow this EXACT pattern:
+1. Use get_client('objectstorage', oci_config) to create the client
+2. Get namespace with: namespace = objectstorage_client.get_namespace().data
+3. Use correct create_bucket syntax: objectstorage_client.create_bucket(namespace_name=namespace, create_bucket_details=create_bucket_details)
+4. Create CreateBucketDetails object with: oci.object_storage.models.CreateBucketDetails(name=bucket_name, compartment_id=compartment_id)
+
+EXAMPLE CORRECT PATTERN:
+```python
+objectstorage_client = get_client('objectstorage', oci_config)
+namespace = objectstorage_client.get_namespace().data
+
+for bucket_name in bucket_names:
+    create_bucket_details = oci.object_storage.models.CreateBucketDetails(
+        name=bucket_name,
+        compartment_id=compartment_id
+    )
+    response = objectstorage_client.create_bucket(
+        namespace_name=namespace,
+        create_bucket_details=create_bucket_details
+    )
+```
+
+Generate efficient code that:
+1. Creates all buckets in a single loop
+2. Handles errors for each bucket individually
+3. Returns results for all buckets
+4. Uses the same compartment_id for all buckets
+5. Follows the EXACT OCI SDK pattern above
+
+Return ONLY the Python code, no explanations.
+"""
+    else:
+        # Fallback to individual generation for other actions
+        return _generate_individual_step_code(steps, state, call_llm_func)
+
+    messages = [
+        {"role": "system", "content": optimized_prompt},
+        {"role": "user",
+            "content": f"Generate optimized batch code for {len(resource_names)} {action} operations"}
+    ]
+
+    try:
+        llm_output = call_llm_func(state, messages, 'codegen')
+        response_str = str(llm_output).strip()
+
+        # Extract code from response
+        if "```" in response_str:
+            code_start = response_str.find("```")
+            code_end = response_str.find("```", code_start + 3)
+            if code_end > code_start:
+                oci_code = response_str[code_start + 3:code_end]
+                oci_code = re.sub(r"^\s*python\s*\r?\n", "",
+                                  oci_code, flags=re.IGNORECASE).strip()
+            else:
+                oci_code = response_str
+        else:
+            oci_code = re.sub(r"^\s*python\s*\r?\n", "",
+                              response_str, flags=re.IGNORECASE).strip()
+
+        # Create optimized plan with single batch code
+        optimized_plan = {
+            'action': f'batch_{action}',
+            'service': service,
+            'params': first_step.get('params', {}),
+            'oci_code': oci_code,
+            'optimized': True,
+            'batch_size': len(steps)
+        }
+
+        print(
+            f"✅ Generated optimized batch code for {len(steps)} {action} operations")
+        return {"plan": optimized_plan, "last_node": "codegen"}
+
+    except Exception as e:
+        print(
+            f"⚠️ Batch optimization failed, falling back to individual generation: {e}")
+        return _generate_individual_step_code(steps, state, call_llm_func)
+
+
+def _generate_individual_step_code(steps: list, state: AgentState, call_llm_func) -> dict:
+    """Generate individual code for each step (original behavior)."""
+    updated_steps = []
+
+    for i, step in enumerate(steps):
+        print(
+            f"🔄 Generating code for step {i+1}/{len(steps)}: {step.get('action', 'unknown')}")
+
+        # Create a single-step plan for code generation
+        single_step_plan = {
+            'action': step.get('action'),
+            'service': step.get('service'),
+            'params': step.get('params', {})
+        }
+
+        # Generate code for this step
+        step_result = _generate_single_step_code(
+            single_step_plan, state, call_llm_func)
+
+        if step_result.get('plan_error'):
+            return {"plan": None, "plan_error": f"Step {i+1} codegen failed: {step_result['plan_error']}", "last_node": "codegen"}
+
+        # Add the generated code to the step
+        updated_step = step.copy()
+        updated_step['oci_code'] = step_result['plan'].get('oci_code')
+        updated_steps.append(updated_step)
+
+    # Update the plan with generated code for all steps
+    updated_plan = {
+        'steps': updated_steps,
+        'requires_confirmation': True,
+        'safety_tier': 'destructive'
+    }
+
+    print(f"✅ Generated code for {len(updated_steps)} steps")
+    return {"plan": updated_plan, "last_node": "codegen"}
+
+
+def _generate_single_step_code(step_plan: dict, state: AgentState, call_llm_func) -> dict:
+    """Generate code for a single step in a multi-step plan."""
+    action = step_plan.get('action')
+    params = step_plan.get('params', {})
+    service = step_plan.get('service', 'unknown')
+
+    # Get user query for context
+    user_query = state.get("user_input", "") or state.get(
+        "normalized_query", "")
+
+    # Determine service from action if not provided
+    if service == "unknown":
+        service_map = {
+            "list_instances": "compute",
+            "get_instance": "compute",
+            "start_instance": "compute",
+            "stop_instance": "compute",
+            "terminate_instance": "compute",
+            "list_volumes": "blockstorage",
+            "list_buckets": "objectstorage",
+            "create_bucket": "objectstorage",
+            "delete_bucket": "objectstorage",
+            "list_compartments": "identity",
+            "list_users": "identity",
+            "list_groups": "identity",
+            "list_vcns": "virtualnetwork",
+            "list_subnets": "virtualnetwork",
+            "list_alarms": "monitoring",
+            "list_databases": "database",
+            "list_load_balancers": "loadbalancer"
+        }
+        service = service_map.get(action, "unknown")
+
+    # Load codegen prompt
+    codegen_prompt = get_codegen_prompt(
+        step_plan, action, params, user_query, False, service)
+
+    messages = [
+        {"role": "system", "content": codegen_prompt},
+        {"role": "user", "content": f"Generate OCI code for action '{action}' with params {params}. User wants: {user_query}"}
+    ]
+
+    try:
+        llm_output = call_llm_func(state, messages, 'codegen')
+        response_str = str(llm_output).strip()
+
+        # Extract code from response
+        if "```python" in response_str:
+            start = response_str.find("```python") + 10
+            end = response_str.find("```", start)
+            if end > start:
+                oci_code = response_str[start:end].strip()
+            else:
+                oci_code = response_str[start:].strip()
+        elif "```" in response_str:
+            start = response_str.find("```") + 3
+            end = response_str.find("```", start)
+            if end > start:
+                oci_code = response_str[start:end].strip()
+            else:
+                oci_code = response_str[start:].strip()
+        else:
+            oci_code = response_str
+
+        # Create updated plan with generated code
+        updated_plan = step_plan.copy()
+        updated_plan['oci_code'] = oci_code
+
+        return {"plan": updated_plan}
+
+    except Exception as e:
+        return {"plan": None, "plan_error": f"Code generation failed: {e}"}

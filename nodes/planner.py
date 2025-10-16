@@ -88,7 +88,8 @@ def _handle_direct_fetch(analysis_result: dict, state: dict, call_llm_func, star
             "plan": plan,
             "last_node": "planner",
             "planning_time": total_time,
-            "execution_strategy": "direct_fetch"
+            "execution_strategy": "direct_fetch",
+            "next_step": "codegen"  # Direct fetch operations go straight to codegen
         }
     else:
         print(f"⚠️ No template found, falling back to LLM")
@@ -156,15 +157,41 @@ def _handle_multi_step(normalized_query: str, analysis_result: dict, state: dict
 
         print(f"✅ Generated multi-step plan")
         print(f"⏱️ Total planning time: {total_time:.2f}s")
+        print(f"🔍 DEBUG: Plan details: {plan}")
         print("*" * 60)
 
-        return {
-            "plan": plan,
-            "last_node": "planner",
-            "planning_time": total_time,
-            "execution_strategy": "multi_step",
-            "analysis_result": analysis_result
-        }
+        # Check for missing parameters and route accordingly
+        missing_params = plan.get("missing_parameters", [])
+        action = plan.get("action", "")
+        print(f"🔍 DEBUG: Plan missing_parameters: {missing_params}")
+        print(f"🔍 DEBUG: Plan action: {action}")
+        print(f"🔍 DEBUG: Plan keys: {list(plan.keys())}")
+
+        # Check if this is a multi-step plan
+        is_multi_step = 'steps' in plan and isinstance(plan.get('steps'), list)
+
+        # Only route to supervisor for deployment operations with missing parameters
+        if missing_params and (action.startswith('create_') or is_multi_step):
+            print(
+                f"🔄 Planner: Deployment operation with missing parameters: {missing_params}")
+            return {
+                "plan": plan,
+                "last_node": "planner",
+                "planning_time": total_time,
+                "execution_strategy": "multi_step",
+                "analysis_result": analysis_result,
+                "next_step": "supervisor"  # Route to supervisor for parameter gathering
+            }
+        else:
+            print(f"🔄 Planner: No parameter check needed, routing directly to codegen")
+            return {
+                "plan": plan,
+                "last_node": "planner",
+                "planning_time": total_time,
+                "execution_strategy": "multi_step",
+                "analysis_result": analysis_result,
+                "next_step": "codegen"  # Route directly to codegen for all other cases
+            }
 
     except Exception as e:
         error_msg = str(e)
@@ -376,8 +403,13 @@ def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
     is_mutating = analysis_result.get('is_mutating', False)
     action = plan.get('action', '')
 
-    if is_mutating:
-        print(f"⚠️ Mutating action detected: {action}")
+    # Only check parameters for DEPLOYMENT/CREATION operations, not data fetching
+    is_deployment_operation = action.startswith(
+        'create_') or action.startswith('deploy_')
+    is_multi_step = 'steps' in plan and isinstance(plan.get('steps'), list)
+
+    if is_mutating and (is_deployment_operation or is_multi_step):
+        print(f"⚠️ Mutating deployment action detected: {action}")
         plan['requires_confirmation'] = True
         plan['safety_tier'] = 'destructive'
 
@@ -385,7 +417,19 @@ def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
         missing_params = []
         params = plan.get('params', {})
 
-        if action == 'create_instance':
+        if is_multi_step:
+            # For multi-step plans, check if compartment_id is missing in steps
+            steps = plan.get('steps', [])
+            if steps:
+                # Check if the first step has compartment_id
+                first_step_params = steps[0].get('params', {})
+                if 'compartment_id' not in first_step_params:
+                    missing_params = ['compartment_id']
+                else:
+                    missing_params = []
+            else:
+                missing_params = ['compartment_id']
+        elif action == 'create_instance':
             required_params = ['compartment_id',
                                'shape', 'image_id', 'subnet_id']
             missing_params = [
@@ -402,6 +446,10 @@ def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
             required_params = ['compartment_id', 'shape_name', 'subnet_ids']
             missing_params = [
                 param for param in required_params if param not in params]
+        elif action == 'delete_bucket':
+            required_params = ['name']
+            missing_params = [
+                param for param in required_params if param not in params]
 
         if missing_params:
             plan['missing_parameters'] = missing_params
@@ -410,10 +458,11 @@ def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
             print(f"✅ All required parameters present")
 
         print(f"🔍 DEBUG: Plan params: {plan.get('params', {})}")
-        print(f"🔍 DEBUG: Required params: {required_params}")
+        if not is_multi_step:
+            print(f"🔍 DEBUG: Required params: {required_params}")
         print(f"🔍 DEBUG: Missing params: {missing_params}")
     else:
-        print(f"✅ Safe action: {action}")
+        print(f"✅ Safe action: {action} (no parameter check needed)")
         plan['safety_tier'] = 'safe'
 
     return plan
@@ -439,5 +488,6 @@ def _handle_compartment_listing(state: AgentState) -> dict:
         "last_node": "planner",
         "sub_task_result": "compartment_listing",
         "pending_plan": state.get("pending_plan"),
-        "missing_parameters": state.get("missing_parameters", [])
+        "missing_parameters": state.get("missing_parameters", []),
+        "next_step": "codegen"
     }

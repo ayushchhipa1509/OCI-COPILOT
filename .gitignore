@@ -198,10 +198,14 @@ embeddings/
 session_*
 *.session
 
-# Test files
-test_*
+# Test files (keep test structure but ignore temporary test files)
+test_*.py
 *_test.py
-tests/
+# Keep tests/ directory structure but ignore temp files
+tests/temp/
+tests/cache/
+tests/*.tmp
+tests/*.temp
 archive/
 archives/
 
@@ -220,3 +224,17 @@ coverage.xml
 # Local development
 local_config.py
 dev_config.py
+
+# Memory and conversation files
+memory/
+conversation_history.json
+*.json.bak
+
+# LangSmith and tracing
+.langsmith/
+langsmith_*
+
+# Additional OCI specific
+*.oci
+oci_*
+.oci_config

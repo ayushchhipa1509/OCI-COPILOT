@@ -83,3 +83,15 @@ class AgentState(TypedDict, total=False):
     confirmation_type: Optional[str]
     action_cancelled: bool
     cancellation_reason: Optional[str]
+
+    # --- Memory & Context ---
+    short_term_memory: Optional[Dict[str, Any]]
+    user_preferences: Optional[Dict[str, Any]]
+    project_context: Optional[Dict[str, Any]]
+    conversation_context: Optional[Dict[str, Any]]
+    recent_actions: Optional[List[Dict[str, Any]]]
+    memory_manager: Optional[Any]  # Memory manager instance
+
+    # --- Safety & Loop Prevention ---
+    recursion_count: int  # Track number of node executions
+    max_recursion: int  # Maximum allowed recursions (default: 20)

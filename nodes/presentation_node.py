@@ -18,6 +18,15 @@ def presentation_node(state: AgentState) -> dict:
     print("🎬 PRESENTATION NODE - STARTING")
     print("=" * 60)
 
+    # Use memory context for smart suggestions
+    conversation_context = state.get("conversation_context", {})
+    user_preferences = state.get("user_preferences", {})
+    recent_actions = state.get("recent_actions", [])
+
+    print(
+        f"🎬 PRESENTATION: Memory context - Recent actions: {len(recent_actions)}")
+    print(f"🎬 PRESENTATION: User preferences: {len(user_preferences)}")
+
     # Handle safety confirmation prompts
     if state.get("confirmation_required"):
         return _handle_safety_confirmation(state)
@@ -34,78 +43,94 @@ def presentation_node(state: AgentState) -> dict:
     if state.get("compartment_listing_complete"):
         return _handle_compartment_selection(state)
 
-    data_source = state.get("data_source", "live_api")
-    user_query = state.get("user_input", "")
-    execution_result = state.get("execution_result", {})
-    call_llm_func = state.get("call_llm", default_call_llm)
+    try:
+        data_source = state.get("data_source", "live_api")
+        user_query = state.get("user_input", "")
+        execution_result = state.get("execution_result", {})
+        call_llm_func = state.get("call_llm", default_call_llm)
 
-    if state.get("intent") in ["general_chat", "oci_question"] or state.get("execution_error"):
-        summary = state.get("execution_error") or user_query
-        if state.get("intent") in ["general_chat", "oci_question"]:
-            prompt_template = load_prompt('presentation')
-            final_prompt = f"{prompt_template}\n\n## Input Context\n{json.dumps({'user_query': user_query}, default=str)}"
-            summary = call_llm_func(
-                state, [{"role": "user", "content": final_prompt}], "final_presentation_chat")
-        return {"presentation": {"summary": str(summary).strip(), "format": "chat"}}
+        # Handle plan errors with user-friendly messages
+        if state.get("plan_error"):
+            return _handle_plan_error(state, call_llm_func)
 
-    if data_source == "rag_cache":
-        print("🎬 PRESENTATION: Processing pre-filtered RAG data")
-        try:
-            rag_metas = execution_result.get("metadatas", [])
-            total_resources = len(rag_metas)
+        if state.get("intent") in ["general_chat", "oci_question"] or state.get("execution_error"):
+            summary = state.get("execution_error") or user_query
+            if state.get("intent") in ["general_chat", "oci_question"]:
+                prompt_template = load_prompt('presentation')
+                final_prompt = f"{prompt_template}\n\n## Input Context\n{json.dumps({'user_query': user_query}, default=str)}"
+                summary = call_llm_func(
+                    state, [{"role": "user", "content": final_prompt}], "final_presentation_chat")
+            return {"presentation": {"summary": str(summary).strip(), "format": "chat"}}
 
-            if total_resources == 0:
-                summary = "I searched the cache, but couldn't find any resources that precisely match your query."
-            else:
-                analysis_input = {"data": rag_metas}
-                summary = run_llm_analysis(
-                    user_query, analysis_input, call_llm_func, state)
+        if data_source == "rag_cache":
+            print("🎬 PRESENTATION: Processing pre-filtered RAG data")
+            try:
+                rag_metas = execution_result.get("metadatas", [])
+                total_resources = len(rag_metas)
 
-            return {
-                "presentation": {
-                    "summary": summary,
-                    "format": "table" if total_resources > 0 else "chat",
-                    "data": rag_metas,
-                    "columns": []
+                if total_resources == 0:
+                    summary = "I searched the cache, but couldn't find any resources that precisely match your query."
+                else:
+                    analysis_input = {"data": rag_metas}
+                    summary = run_llm_analysis(
+                        user_query, analysis_input, call_llm_func, state)
+
+                return {
+                    "presentation": {
+                        "summary": summary,
+                        "format": "table" if total_resources > 0 else "chat",
+                        "data": rag_metas,
+                        "columns": []
+                    }
                 }
-            }
-        except Exception as e:
-            return {"presentation": {"summary": f"Error processing cached data: {e}", "format": "chat"}}
+            except Exception as e:
+                return {"presentation": {"summary": f"Error processing cached data: {e}", "format": "chat"}}
 
-    else:
-        print("🎬 PRESENTATION: Processing live API data")
-        try:
-            if isinstance(execution_result, list):
-                normalized_execution_result = {"data": execution_result}
-            else:
-                normalized_execution_result = execution_result or {"data": []}
+        else:
+            print("🎬 PRESENTATION: Processing live API data")
+            try:
+                if isinstance(execution_result, list):
+                    normalized_execution_result = {"data": execution_result}
+                else:
+                    normalized_execution_result = execution_result or {
+                        "data": []}
 
-            # Debug: Log the raw data received
-            print(
-                f"DEBUG: Raw execution_result type: {type(execution_result)}")
-            print(
-                f"DEBUG: Raw execution_result length: {len(execution_result) if isinstance(execution_result, list) else 'Not a list'}")
-            print(
-                f"DEBUG: Normalized data length: {len(normalized_execution_result.get('data', []))}")
-            if normalized_execution_result.get('data'):
+                # Debug: Log the raw data received
                 print(
-                    f"DEBUG: First item keys: {list(normalized_execution_result['data'][0].keys()) if normalized_execution_result['data'] else 'No data'}")
+                    f"DEBUG: Raw execution_result type: {type(execution_result)}")
+                print(
+                    f"DEBUG: Raw execution_result length: {len(execution_result) if isinstance(execution_result, list) else 'Not a list'}")
+                print(
+                    f"DEBUG: Normalized data length: {len(normalized_execution_result.get('data', []))}")
+                if normalized_execution_result.get('data'):
+                    print(
+                        f"DEBUG: First item keys: {list(normalized_execution_result['data'][0].keys()) if normalized_execution_result['data'] else 'No data'}")
 
-            summary = run_llm_analysis(
-                user_query, normalized_execution_result, call_llm_func, state)
-            formatted_data = format_execution_result_for_presentation(
-                normalized_execution_result)
+                summary = run_llm_analysis(
+                    user_query, normalized_execution_result, call_llm_func, state)
+                formatted_data = format_execution_result_for_presentation(
+                    normalized_execution_result)
 
-            return {
-                "presentation": {
-                    "summary": summary,
-                    "format": "table" if formatted_data.get("data") else "chat",
-                    "data": formatted_data.get("data", []),
-                    "columns": formatted_data.get("columns", [])
+                return {
+                    "presentation": {
+                        "summary": summary,
+                        "format": "table" if formatted_data.get("data") else "chat",
+                        "data": formatted_data.get("data", []),
+                        "columns": formatted_data.get("columns", [])
+                    }
                 }
+            except Exception as e:
+                return {"presentation": {"summary": f"Error processing live data: {e}", "format": "chat"}}
+
+    except Exception as e:
+        # Catch any unhandled errors and provide user-friendly message
+        print(f"❌ PRESENTATION ERROR: {e}")
+        return {
+            "presentation": {
+                "summary": "I'm experiencing a technical issue right now. Our team is aware of this and working on a fix.\n\nIn the meantime, you can try:\n• **Simple operations**: \"list buckets\", \"list compartments\"\n• **Basic tasks**: \"create a bucket named test-bucket\"\n• **Try again later**: The issue should be resolved soon\n\nSorry for the inconvenience! We're working to improve the system.",
+                "format": "chat"
             }
-        except Exception as e:
-            return {"presentation": {"summary": f"Error processing live data: {e}", "format": "chat"}}
+        }
 
 # --- Helper functions for presentation ---
 
@@ -340,8 +365,8 @@ No changes have been made to your OCI environment.
     }
 
 
-def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None) -> dict:
-    """Parse user input to extract parameter values."""
+def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None, call_llm_func=None) -> dict:
+    """Parse user input to extract parameter values using LLM."""
     selected_params = {}
 
     # Check if user selected a number for compartment
@@ -354,7 +379,52 @@ def _parse_parameter_response(user_input: str, missing_params: list, compartment
                 f"🔄 User selected compartment #{selection_num}: {selected_compartment.get('name')}")
             return selected_params
 
-    # Simple parsing: look for "param_name: value" patterns
+    # Use LLM to extract parameters from natural language
+    if call_llm_func and missing_params:
+        parameter_extraction_prompt = f"""
+You are an OCI parameter extractor. Extract the required parameters from the user's natural language response.
+
+User Response: "{user_input}"
+Missing Parameters: {missing_params}
+
+Extract the parameters from the user's response. Look for:
+- Compartment IDs (any format: ocid1.compartment.oc1.., compartment names, etc.)
+- Resource names
+- Any other required parameters
+
+Respond with JSON:
+{{
+    "extracted_parameters": {{"param_name": "value"}},
+    "confidence": "high/medium/low",
+    "reasoning": "explanation of extraction"
+}}
+"""
+
+        try:
+            # Create a mock state for the LLM call
+            mock_state = {"llm_preference": {"provider": "gemini"}}
+            response = call_llm_func(mock_state, [
+                                     {"role": "user", "content": parameter_extraction_prompt}], "presentation_node")
+            import json
+            extraction_result = json.loads(response)
+
+            extracted_params = extraction_result.get(
+                "extracted_parameters", {})
+            confidence = extraction_result.get("confidence", "low")
+            reasoning = extraction_result.get("reasoning", "")
+
+            print(f"🧠 LLM Parameter Extraction: {extracted_params}")
+            print(f"🧠 Confidence: {confidence}, Reasoning: {reasoning}")
+
+            if extracted_params:
+                selected_params.update(extracted_params)
+                print(f"🔄 LLM extracted parameters: {selected_params}")
+                return selected_params
+
+        except Exception as e:
+            print(f"🔄 LLM parameter extraction failed: {e}")
+
+    # Fallback to simple parsing if LLM fails
     lines = user_input.split('\n')
     for line in lines:
         line = line.strip()
@@ -365,6 +435,18 @@ def _parse_parameter_response(user_input: str, missing_params: list, compartment
             if key in missing_params:
                 selected_params[key] = value
 
+    # If no parameters found with colon format, try to extract OCIDs from natural language
+    if not selected_params and missing_params:
+        import re
+        # Look for OCID patterns in the text (simplified pattern)
+        ocid_pattern = r'ocid1\.[a-zA-Z0-9._-]+'
+        ocids = re.findall(ocid_pattern, user_input)
+
+        if ocids and 'compartment_id' in missing_params:
+            # Use the first OCID found as compartment_id
+            selected_params['compartment_id'] = ocids[0]
+            print(f"🔄 Extracted OCID from natural language: {ocids[0]}")
+
     return selected_params
 
 
@@ -372,8 +454,33 @@ def _handle_parameter_gathering(state: AgentState) -> dict:
     """Handle parameter gathering for deployment operations."""
     pending_plan = state.get("pending_plan", {})
     missing_params = state.get("missing_parameters", [])
-    action = pending_plan.get("action", "unknown action")
-    service = pending_plan.get("service", "unknown service")
+
+    # Handle multi-step plans
+    if "steps" in pending_plan and isinstance(pending_plan.get("steps"), list):
+        # For multi-step plans, find the main destructive action
+        steps = pending_plan.get("steps", [])
+        main_action = "unknown action"
+        main_service = "unknown service"
+
+        # Look for the destructive action (usually the last step)
+        for step in steps:
+            if step.get("safety_tier") == "destructive" or step.get("requires_confirmation"):
+                main_action = step.get("action", "unknown action")
+                main_service = step.get("service", "unknown service")
+                break
+
+        # If no destructive action found, use the last step
+        if main_action == "unknown action" and steps:
+            last_step = steps[-1]
+            main_action = last_step.get("action", "unknown action")
+            main_service = last_step.get("service", "unknown service")
+
+        action = main_action
+        service = main_service
+    else:
+        # For single-step plans
+        action = pending_plan.get("action", "unknown action")
+        service = pending_plan.get("service", "unknown service")
 
     # Build parameter gathering message
     gathering_message = f"""
@@ -488,4 +595,93 @@ I need to know which compartment to use for your **{action.replace('_', ' ').upp
             "pending_plan": pending_plan
         },
         "compartment_data": compartment_data  # Store in state for supervisor access
+    }
+
+
+def _handle_plan_error(state: AgentState, call_llm_func) -> dict:
+    """Handle plan errors with user-friendly messages."""
+    plan_error = state.get("plan_error", "")
+    user_query = state.get("user_input", "")
+
+    # Create user-friendly error messages based on the type of error
+    if "multiple" in plan_error.lower() or "steps" in plan_error.lower():
+        # Handle multiple bucket creation errors
+        friendly_message = f"""I understand you want to create multiple buckets, but I'm having trouble processing that request right now. 
+
+Here are some alternatives you can try:
+• Create one bucket at a time: "create a bucket named ayush_1"
+• List existing buckets: "list buckets" 
+• Try a different approach: "show me my storage resources"
+
+Would you like me to help you create buckets one by one instead?"""
+
+    elif "unsupported" in plan_error.lower() or "format" in plan_error.lower():
+        # Handle unsupported plan format errors
+        friendly_message = f"""I'm having trouble understanding your request. Let me help you with a simpler approach:
+
+• For creating resources: "create a bucket named [name]"
+• For listing resources: "list [resource type]"
+• For getting help: "what can you help me with?"
+
+Could you try rephrasing your request in a simpler way?"""
+
+    elif "planner" in plan_error.lower() or "planning" in plan_error.lower() or "required_params" in plan_error.lower():
+        # Handle planner errors
+        friendly_message = f"""I'm having trouble planning your request right now. This is a temporary issue that our team is working on.
+
+Here are some things you can try:
+• **Simple operations**: "list buckets", "list compartments"
+• **Basic creation**: "create a bucket named test-bucket"
+• **Try again in a moment**: The system might be busy
+
+Sorry for the inconvenience! Our team is working to improve this functionality."""
+
+    elif "codegen" in plan_error.lower() or "llm" in plan_error.lower():
+        # Handle code generation errors
+        friendly_message = f"""I'm having trouble generating the code for your request. This might be due to:
+
+• Complex requirements that need to be broken down
+• Missing information needed for the operation
+• Temporary processing issues
+
+Try these alternatives:
+• Simplify your request: "create a bucket named test-bucket"
+• Check your OCI credentials are properly configured
+• Try a different type of operation: "list compartments"
+
+Would you like to try a simpler request?"""
+
+    elif "keyerror" in plan_error.lower() or "cannot access" in plan_error.lower() or "variable" in plan_error.lower():
+        # Handle technical errors
+        friendly_message = f"""I'm experiencing a technical issue right now. Our team is aware of this and working on a fix.
+
+In the meantime, you can try:
+• **Simple operations**: "list buckets", "list compartments"
+• **Basic tasks**: "create a bucket named test-bucket"
+• **Try again later**: The issue should be resolved soon
+
+Sorry for the inconvenience! We're working to improve the system."""
+
+    else:
+        # Generic error handling
+        friendly_message = f"""I encountered an issue processing your request. This can happen when:
+
+• The request is too complex for me to handle
+• There's missing information I need
+• There are temporary processing issues
+
+Here are some things you can try:
+• Break down complex requests into simpler ones
+• Make sure you've provided all necessary details
+• Try a different type of operation
+
+For example, instead of "create 3 buckets", try "create a bucket named test-bucket".
+
+Would you like to try a different approach?"""
+
+    return {
+        "presentation": {
+            "summary": friendly_message,
+            "format": "chat"
+        }
     }

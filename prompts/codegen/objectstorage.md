@@ -36,6 +36,8 @@ for compartment in all_compartments:
 
 ### 2. List Empty Buckets (Multi-step with Performance Optimization)
 
+**CRITICAL**: This pattern correctly identifies truly empty buckets by checking object count.
+
 ```python
 for compartment in all_compartments:
     try:
@@ -61,10 +63,89 @@ for compartment in all_compartments:
                     bucket_name=bucket.name,
                     limit=1  # CRITICAL PERFORMANCE OPTIMIZATION
                 )
-                if not objects_response.data.objects:
-                    results.append(to_dict(bucket))
-            except oci.exceptions.ServiceError:
-                continue  # Skip buckets we cannot access
+                # Check if bucket is truly empty
+                if not objects_response.data.objects or len(objects_response.data.objects) == 0:
+                    # Add bucket info with empty confirmation
+                    bucket_info = to_dict(bucket)
+                    bucket_info['is_empty'] = True
+                    bucket_info['object_count'] = 0
+                    results.append(bucket_info)
+            except oci.exceptions.ServiceError as e:
+                # Skip buckets we cannot access, but log the reason
+                print(f"Cannot check bucket {bucket.name}: {e.message}")
+                continue
+
+    except oci.exceptions.ServiceError:
+        continue
+```
+
+### 2a. Alternative: List Empty Buckets with Object Count Verification
+
+```python
+for compartment in all_compartments:
+    try:
+        # Get ALL buckets in the compartment
+        response = objectstorage_client.list_buckets(
+            namespace_name=namespace,
+            compartment_id=compartment.id
+        )
+        all_buckets = response.data
+        while response.has_next_page:
+            response = objectstorage_client.list_buckets(
+                namespace_name=namespace,
+                compartment_id=compartment.id,
+                page=response.next_page
+            )
+            all_buckets.extend(response.data)
+
+        # Check each bucket for emptiness with proper verification
+        for bucket in all_buckets:
+            try:
+                # First, try to get object count with limit=1 for performance
+                objects_response = objectstorage_client.list_objects(
+                    namespace_name=namespace,
+                    bucket_name=bucket.name,
+                    limit=1
+                )
+
+                # If we get here, the bucket exists and we can check it
+                if objects_response.data.objects is None or len(objects_response.data.objects) == 0:
+                    # Double-check by getting the actual count
+                    try:
+                        # Get a more comprehensive check
+                        full_objects_response = objectstorage_client.list_objects(
+                            namespace_name=namespace,
+                            bucket_name=bucket.name,
+                            limit=1000  # Reasonable limit for verification
+                        )
+
+                        # Count all objects (handle pagination if needed)
+                        total_objects = len(full_objects_response.data.objects)
+                        while full_objects_response.has_next_page:
+                            full_objects_response = objectstorage_client.list_objects(
+                                namespace_name=namespace,
+                                bucket_name=bucket.name,
+                                page=full_objects_response.next_page,
+                                limit=1000
+                            )
+                            total_objects += len(full_objects_response.data.objects)
+
+                        # Only add if truly empty
+                        if total_objects == 0:
+                            bucket_info = to_dict(bucket)
+                            bucket_info['is_empty'] = True
+                            bucket_info['object_count'] = 0
+                            bucket_info['verified_empty'] = True
+                            results.append(bucket_info)
+
+                    except oci.exceptions.ServiceError:
+                        # If we can't verify, skip this bucket
+                        continue
+
+            except oci.exceptions.ServiceError as e:
+                # Skip buckets we cannot access
+                print(f"Cannot access bucket {bucket.name}: {e.message}")
+                continue
 
     except oci.exceptions.ServiceError:
         continue
@@ -212,4 +293,59 @@ created_bucket_response = objectstorage_client.create_bucket(
 
 # Append the created resource details (as a dictionary) to the results
 results.append(to_dict(created_bucket_response.data))
+```
+
+### 6. Delete Action: `delete_bucket`
+
+When the plan action is `delete_bucket`, you must generate code to delete an Object Storage bucket. **WARNING**: This is a destructive operation that cannot be undone.
+
+```python
+from oci.util import to_dict
+
+# Create Object Storage client
+objectstorage_client = get_client('objectstorage', oci_config)
+namespace = objectstorage_client.get_namespace().data
+
+# Extract details from the plan's params
+bucket_name = plan['params'].get('name')
+
+# Delete the bucket
+# WARNING: This operation is irreversible
+try:
+    delete_bucket_response = objectstorage_client.delete_bucket(
+        namespace_name=namespace,
+        bucket_name=bucket_name
+    )
+
+    # Bucket deletion doesn't return data, so we create a confirmation message
+    results.append({
+        'action': 'delete_bucket',
+        'bucket_name': bucket_name,
+        'status': 'deleted',
+        'message': f'Bucket {bucket_name} has been successfully deleted'
+    })
+
+except oci.exceptions.ServiceError as e:
+    # Handle common deletion errors
+    if e.status == 404:
+        results.append({
+            'action': 'delete_bucket',
+            'bucket_name': bucket_name,
+            'status': 'not_found',
+            'message': f'Bucket {bucket_name} not found or already deleted'
+        })
+    elif e.status == 409:
+        results.append({
+            'action': 'delete_bucket',
+            'bucket_name': bucket_name,
+            'status': 'not_empty',
+            'message': f'Cannot delete bucket {bucket_name} - bucket is not empty. Please delete all objects first.'
+        })
+    else:
+        results.append({
+            'action': 'delete_bucket',
+            'bucket_name': bucket_name,
+            'status': 'error',
+            'message': f'Failed to delete bucket {bucket_name}: {e.message}'
+        })
 ```

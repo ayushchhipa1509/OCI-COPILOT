@@ -56,13 +56,38 @@ def validate_llm_credentials(provider):
 
 def validate_oci_credentials():
     """Validate if OCI credentials are provided."""
-    required_creds = ["OCI_TENANCY", "OCI_USER",
-                      "OCI_FINGERPRINT", "OCI_KEY_FILE"]
-    missing_creds = []
+    # First check if OCI credentials are provided in session state (UI filled)
+    oci_creds = st.session_state.get('oci_creds', {})
+    if oci_creds:
+        tenancy = oci_creds.get('tenancy', '').strip()
+        user = oci_creds.get('user', '').strip()
+        fingerprint = oci_creds.get('fingerprint', '').strip()
+        key_content = oci_creds.get('key_content', '').strip()
 
-    for cred in required_creds:
-        if not os.getenv(cred):
-            missing_creds.append(cred)
+        if tenancy and user and fingerprint and key_content:
+            return True, None
+
+    # If not in session state, check environment variables
+    tenancy_vars = ["OCI_TENANCY", "OCI_TENANCY_ID", "TENANCY_OCID"]
+    user_vars = ["OCI_USER", "OCI_USER_ID", "USER_OCID"]
+    fingerprint_vars = ["OCI_FINGERPRINT", "FINGERPRINT"]
+    key_vars = ["OCI_KEY_FILE", "KEY_FILE", "OCI_PRIVATE_KEY"]
+
+    # Check if any of the common patterns exist
+    tenancy_found = any(os.getenv(var) for var in tenancy_vars)
+    user_found = any(os.getenv(var) for var in user_vars)
+    fingerprint_found = any(os.getenv(var) for var in fingerprint_vars)
+    key_found = any(os.getenv(var) for var in key_vars)
+
+    missing_creds = []
+    if not tenancy_found:
+        missing_creds.append("Tenancy OCID")
+    if not user_found:
+        missing_creds.append("User OCID")
+    if not fingerprint_found:
+        missing_creds.append("Fingerprint")
+    if not key_found:
+        missing_creds.append("Private Key")
 
     if missing_creds:
         return False, f"Missing OCI credentials: {', '.join(missing_creds)}"
@@ -261,23 +286,61 @@ def draw_graph_matplotlib(agent_graph):
     try:
         graph = agent_graph.get_graph()
         nx_graph = nx.DiGraph()
+
+        # Add all nodes
         for node_name in graph.nodes:
             nx_graph.add_node(node_name)
+
+        # Add all edges
         for edge in graph.edges:
             nx_graph.add_edge(edge.source, edge.target)
 
         fig, ax = plt.subplots(figsize=(12, 10))
+
+        # Use the original kamada_kawai layout for better flow
         pos = nx.kamada_kawai_layout(nx_graph)
+
+        # Define darker, more vibrant colors for different node types
+        node_colors = []
+        for node in nx_graph.nodes():
+            if 'memory' in node:
+                node_colors.append('#2196F3')  # Dark blue for memory nodes
+            elif node == 'supervisor':
+                node_colors.append('#9C27B0')  # Dark purple for supervisor
+            elif node == 'normalizer':
+                node_colors.append('#4CAF50')  # Dark green for normalizer
+            elif node == 'planner':
+                node_colors.append('#E91E63')  # Dark pink for planner
+            elif node == 'codegen':
+                node_colors.append('#8BC34A')  # Dark lime for codegen
+            elif node == 'executor':
+                node_colors.append('#03A9F4')  # Dark blue for executor
+            elif node == 'presentation_node':
+                node_colors.append('#4CAF50')  # Dark green for presentation
+            elif node == 'verifier':
+                node_colors.append('#FF9800')  # Dark orange for verifier
+            elif node == 'rag_retriever':
+                node_colors.append('#FF5722')  # Dark red-orange for RAG
+            else:
+                node_colors.append('#607D8B')  # Dark gray for others
+
+        # Draw nodes as squares with colors
         nx.draw_networkx_nodes(nx_graph, pos, node_size=3500,
-                               node_color="#a7c7e7", ax=ax)
+                               node_color=node_colors, ax=ax, node_shape='s')
+
+        # Draw node labels
         nx.draw_networkx_labels(nx_graph, pos, font_size=9,
                                 font_weight="bold", ax=ax)
+
+        # Draw edges
         nx.draw_networkx_edges(nx_graph, pos, width=1.0, alpha=0.6,
                                edge_color="gray", arrows=True, arrowsize=20, ax=ax)
-        ax.set_title("Agent State Graph", size=16)
+
+        ax.set_title("Agent Graph", size=16)
         plt.tight_layout()
         plt.axis("off")
         st.pyplot(fig)
+
     except Exception as e:
         st.error(f"❌ Error drawing graph: {e}")
 
@@ -717,19 +780,13 @@ with st.sidebar:
     st.divider()
     st.header("📊 Agent Internals")
 
-    # Enhanced flowchart visualization
-    if st.checkbox("Show Enhanced Flowchart"):
-        try:
-            from core.graph_visualizer import draw_agent_flowchart
-            draw_agent_flowchart()
-        except Exception as e:
-            st.error(f"Failed to load flowchart: {e}")
-            st.info("Falling back to standard graph visualization...")
-            agent_graph = st.session_state.get("agent_graph")
-            if agent_graph:
-                draw_graph_matplotlib(agent_graph)
-            else:
-                st.warning("Agent graph not available.")
+    # Agent Graph visualization
+    if st.checkbox("Show Agent Graph"):
+        agent_graph = st.session_state.get("agent_graph")
+        if agent_graph:
+            draw_graph_matplotlib(agent_graph)
+        else:
+            st.warning("Agent graph not available.")
 
 # ============================================================================
 # AMAZON Q STYLE PROGRESS DISPLAY
@@ -928,6 +985,9 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                 # Add toggle state
                 "use_rag_chain": st.session_state.get('use_rag_chain', False),
                 "plan": None,
+                # Initialize recursion safety
+                "recursion_count": 0,
+                "max_recursion": 20,
                 "plan_error": None,
                 "plan_valid": False,
                 "verify_retries": 0,
@@ -950,7 +1010,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
             presentation_object = {}
             try:
                 # ✅ FIXED: Merge updates instead of overwriting
-                for chunk in st.session_state.agent_graph.stream(initial_state, {"recursion_limit": 50}):
+                for chunk in st.session_state.agent_graph.stream(initial_state, {"recursion_limit": 100}):
                     for node_name, update in chunk.items():
                         final_state.update(update)
 

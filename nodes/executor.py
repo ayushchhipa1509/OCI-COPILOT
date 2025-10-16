@@ -16,6 +16,10 @@ def executor_node(state: AgentState) -> dict:
         return {"execution_error": "No plan to execute.", "last_node": "executor"}
 
     try:
+        # Check if this is a multi-step plan
+        if 'steps' in plan and isinstance(plan.get('steps'), list):
+            return _execute_multi_step_plan(plan, state)
+
         oci_code = plan.get("oci_code")
         service = plan.get("service")
         if not oci_code:
@@ -46,6 +50,7 @@ def executor_node(state: AgentState) -> dict:
             'get_client': _get_client_wrapper,
             'oci': oci,
             'oci_config': oci_config,
+            'plan': plan,  # Add plan to execution context
             # Keep builtins but you might want to restrict in production
             '__builtins__': __builtins__
         }
@@ -157,3 +162,144 @@ def _indent_code(code: str, spaces: int) -> str:
     """Helper to indent a multiline code block for function wrapping."""
     prefix = ' ' * spaces
     return '\n'.join(prefix + line if line.strip() != '' else line for line in code.splitlines())
+
+
+def _execute_multi_step_plan(plan: dict, state: AgentState) -> dict:
+    """Execute a multi-step plan by running each step sequentially."""
+    print("🔄 Executing multi-step plan...")
+
+    steps = plan.get('steps', [])
+    all_results = []
+    execution_errors = []
+
+    # Get compartment_id from plan params (applied to all steps)
+    compartment_id = plan.get('params', {}).get('compartment_id')
+
+    for i, step in enumerate(steps):
+        print(
+            f"🔄 Executing step {i+1}/{len(steps)}: {step.get('action', 'unknown')}")
+
+        try:
+            # Create a single-step plan for this step
+            single_step_plan = {
+                'action': step.get('action'),
+                'service': step.get('service'),
+                'params': step.get('params', {}),
+                'oci_code': step.get('oci_code')
+            }
+
+            # Add compartment_id to step params if not present
+            if compartment_id and 'compartment_id' not in single_step_plan['params']:
+                single_step_plan['params']['compartment_id'] = compartment_id
+
+            # Execute this step
+            step_result = _execute_single_step(single_step_plan, state)
+
+            if step_result.get('execution_error'):
+                execution_errors.append(
+                    f"Step {i+1}: {step_result['execution_error']}")
+            else:
+                all_results.extend(step_result.get('execution_result', []))
+
+        except Exception as e:
+            error_msg = f"Step {i+1} failed: {str(e)}"
+            execution_errors.append(error_msg)
+            print(f"❌ {error_msg}")
+
+    # Return combined results
+    if execution_errors:
+        return {
+            "execution_result": all_results,
+            "execution_error": f"Multi-step execution completed with {len(execution_errors)} errors: {'; '.join(execution_errors)}",
+            "last_node": "executor"
+        }
+    else:
+        return {
+            "execution_result": all_results,
+            "last_node": "executor"
+        }
+
+
+def _execute_single_step(step_plan: dict, state: AgentState) -> dict:
+    """Execute a single step from a multi-step plan."""
+    # This is a simplified version of the main executor logic
+    # for executing individual steps
+
+    oci_code = step_plan.get("oci_code")
+    if not oci_code:
+        return {"execution_error": "No OCI code found in step."}
+
+    # verify credentials are present
+    oci_creds = state.get("oci_creds") or {}
+    if not oci_creds.get("tenancy"):
+        return {"execution_error": "Missing tenancy in state['oci_creds']."}
+
+    try:
+        # Import required modules for code execution
+        from oci_ops.clients import get_client, build_config
+        import oci
+
+        # Build proper OCI config from credentials
+        oci_config = build_config(oci_creds)
+
+        # Wrapper to support both signatures used by generated code
+        def _get_client_wrapper(service_name, *args, **kwargs):
+            return get_client(service_name, oci_config)
+
+        # Prepare execution environment
+        exec_globals = {
+            'state': state,
+            'get_client': _get_client_wrapper,
+            'oci': oci,
+            'oci_config': oci_config,
+            'plan': step_plan,
+            '__builtins__': __builtins__
+        }
+
+        # Sanitize code
+        import re
+        oci_code_sanitized = str(oci_code)
+        if "```" in oci_code_sanitized:
+            start = oci_code_sanitized.find("```")
+            end = oci_code_sanitized.find("```", start + 3)
+            if end > start:
+                oci_code_sanitized = oci_code_sanitized[start + 3:end]
+
+        oci_code_sanitized = re.sub(
+            r"^\s*python\s*\r?\n", "", oci_code_sanitized, flags=re.IGNORECASE)
+        oci_code_sanitized = re.sub(
+            r'\nreturn\s+results\s*$', '', oci_code_sanitized)
+        oci_code_sanitized = re.sub(r'\nreturn\s+.*$', '', oci_code_sanitized)
+
+        # Wrap safely as a function
+        wrapped_code = f'''
+def execute_oci_operation():
+{_indent_code(oci_code_sanitized, 4)}
+    return results if 'results' in locals() else []
+
+# Execute and capture result
+result = execute_oci_operation()
+'''
+        exec_locals = {}
+        exec(wrapped_code, exec_globals, exec_locals)
+        result = exec_locals.get('result', [])
+
+        # Normalize result
+        if hasattr(result, '__iter__') and not isinstance(result, (str, bytes, dict)):
+            try:
+                result_list = list(result)
+            except Exception:
+                result_list = result
+        else:
+            result_list = result if isinstance(result, list) else [result]
+
+        # Sanitize results
+        sanitized_results = _sanitize_results(result_list)
+
+        return {
+            "execution_result": sanitized_results,
+            "last_node": "executor"
+        }
+
+    except Exception as e:
+        return {"execution_error": f"Step execution failed: {str(e)}"}
