@@ -352,7 +352,7 @@ def fetch_namespace(cfg):
 # --- Sidebar ---
 with st.sidebar:
     # Display the OCI icon with better quality
-    st.image("OCI_ICON.png", width=250)
+    st.image("ICON.png", width=250)
     # Collapsible LLM Configuration Section
     with st.expander("🤖 LLM Configuration", expanded=True):
         # Dynamic LLM Provider Selection

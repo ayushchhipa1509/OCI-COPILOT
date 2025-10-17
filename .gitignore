@@ -237,4 +237,5 @@ langsmith_*
 # Additional OCI specific
 *.oci
 oci_*
+!ICON.png
 .oci_config
