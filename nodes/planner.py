@@ -6,6 +6,7 @@ from core.llm_manager import call_llm as default_call_llm
 from core.prompts import load_prompt
 from core.enhanced_intent_analyzer import analyze_intent_and_classify
 from core.query_templates import get_template_plan
+from core.fast_error_handler import handle_node_error
 
 
 def planner_node(state: AgentState) -> dict:
@@ -197,6 +198,9 @@ def _handle_multi_step(normalized_query: str, analysis_result: dict, state: dict
         error_msg = str(e)
         print(f"❌ Multi-step planning error: {e}")
 
+        # Use fast LLM error handler
+        error_response = handle_node_error(e, state, "planner", call_llm_func)
+
         # Check for specific error types
         if "ResourceExhausted" in error_msg or "429" in error_msg:
             print("⚠️ Rate limit exceeded, trying fallback model...")
@@ -322,10 +326,14 @@ def _handle_llm_fallback(normalized_query: str, analysis_result: dict, state: di
 
     except Exception as e:
         print(f"❌ Fallback planning error: {e}")
+
+        # Use fast LLM error handler
+        error_response = handle_node_error(e, state, "planner", call_llm_func)
+
         total_time = time.time() - start_time
         return {
             "plan": None,
-            "plan_error": f"Fallback planning error: {e}",
+            "plan_error": error_response['user_message'],
             "last_node": "planner",
             "planning_time": total_time,
             "execution_strategy": "llm_fallback"

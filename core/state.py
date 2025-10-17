@@ -85,7 +85,6 @@ class AgentState(TypedDict, total=False):
     cancellation_reason: Optional[str]
 
     # --- Memory & Context ---
-    short_term_memory: Optional[Dict[str, Any]]
     user_preferences: Optional[Dict[str, Any]]
     project_context: Optional[Dict[str, Any]]
     conversation_context: Optional[Dict[str, Any]]

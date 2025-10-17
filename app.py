@@ -1,5 +1,6 @@
 # app.py (DEFINITIVE, COMPLETE, WITH GRAPH VISUALIZATION)
 
+from core.graph_visualizer import GraphVisualizer
 import streamlit as st
 import os
 import time
@@ -276,73 +277,51 @@ def download_buttons(df: pd.DataFrame, base_name: str = "oci_export"):
 # ==============================================================================
 
 
-def draw_graph_matplotlib(agent_graph):
-    """Takes a compiled LangGraph agent and draws it using networkx and matplotlib."""
+def draw_agent_flowchart():
+    """Draw the agent flowchart using the enhanced GraphVisualizer."""
     if not GRAPH_VIZ_AVAILABLE:
         st.warning(
-            "⚠️ Graph visualization requires networkx and matplotlib. Install them to see the workflow graph.")
+            "⚠️ Graph visualization requires networkx and matplotlib. Please install them to see the workflow graph.")
         return
 
     try:
-        graph = agent_graph.get_graph()
-        nx_graph = nx.DiGraph()
-
-        # Add all nodes
-        for node_name in graph.nodes:
-            nx_graph.add_node(node_name)
-
-        # Add all edges
-        for edge in graph.edges:
-            nx_graph.add_edge(edge.source, edge.target)
-
-        fig, ax = plt.subplots(figsize=(12, 10))
-
-        # Use the original kamada_kawai layout for better flow
-        pos = nx.kamada_kawai_layout(nx_graph)
-
-        # Define darker, more vibrant colors for different node types
-        node_colors = []
-        for node in nx_graph.nodes():
-            if 'memory' in node:
-                node_colors.append('#2196F3')  # Dark blue for memory nodes
-            elif node == 'supervisor':
-                node_colors.append('#9C27B0')  # Dark purple for supervisor
-            elif node == 'normalizer':
-                node_colors.append('#4CAF50')  # Dark green for normalizer
-            elif node == 'planner':
-                node_colors.append('#E91E63')  # Dark pink for planner
-            elif node == 'codegen':
-                node_colors.append('#8BC34A')  # Dark lime for codegen
-            elif node == 'executor':
-                node_colors.append('#03A9F4')  # Dark blue for executor
-            elif node == 'presentation_node':
-                node_colors.append('#4CAF50')  # Dark green for presentation
-            elif node == 'verifier':
-                node_colors.append('#FF9800')  # Dark orange for verifier
-            elif node == 'rag_retriever':
-                node_colors.append('#FF5722')  # Dark red-orange for RAG
-            else:
-                node_colors.append('#607D8B')  # Dark gray for others
-
-        # Draw nodes as squares with colors
-        nx.draw_networkx_nodes(nx_graph, pos, node_size=3500,
-                               node_color=node_colors, ax=ax, node_shape='s')
-
-        # Draw node labels
-        nx.draw_networkx_labels(nx_graph, pos, font_size=9,
-                                font_weight="bold", ax=ax)
-
-        # Draw edges
-        nx.draw_networkx_edges(nx_graph, pos, width=1.0, alpha=0.6,
-                               edge_color="gray", arrows=True, arrowsize=20, ax=ax)
-
-        ax.set_title("Agent Graph", size=16)
-        plt.tight_layout()
-        plt.axis("off")
+        visualizer = GraphVisualizer()
+        fig = visualizer.draw_graph()  # This calls the draw_graph method from the class
         st.pyplot(fig)
 
+        # Show additional information
+        st.markdown("---")
+        st.subheader("📋 Agent Architecture Details")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### 🧠 Memory System")
+            st.markdown("""
+            - **Memory Context**: Loads user preferences and conversation history
+            - **Memory Manager**: Saves learning patterns and user preferences
+            - **Contextual Awareness**: Provides intelligent suggestions
+            """)
+
+        with col2:
+            st.markdown("### ⚙️ Processing Chain")
+            st.markdown("""
+            - **Supervisor**: Central orchestrator and decision maker
+            - **Normalizer**: Query analysis and routing
+            - **Planner**: Multi-step plan generation
+            - **Codegen**: Code generation with optimization
+            """)
+
+        st.markdown("### 🔄 Self-Correction Loops")
+        st.markdown("""
+        - **Syntax Error Loop**: Verifier → Supervisor → Codegen (retry)
+        - **Runtime Error Loop**: Executor → Supervisor → Codegen (retry)
+        - **Smart Fallback**: RAG → Planner (when no cached data)
+        """)
+
     except Exception as e:
-        st.error(f"❌ Error drawing graph: {e}")
+        st.error(f"❌ An error occurred while drawing the agent flowchart: {e}")
+        st.info("Make sure matplotlib and networkx are installed.")
 
 # ==============================================================================
 # MAIN APPLICATION
@@ -351,8 +330,8 @@ def draw_graph_matplotlib(agent_graph):
 
 # --- Initialization ---
 load_dotenv(dotenv_path='.env', override=True)
-st.set_page_config(page_title="CloudAgentra", layout="wide")
-st.title("☁️ CloudAgentra")
+st.set_page_config(page_title="OCI COPILOT", layout="wide")
+# Clean main area - no welcome message
 
 init_session()
 if "agent_graph" not in st.session_state:
@@ -372,8 +351,8 @@ def fetch_namespace(cfg):
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("☁️ CloudAgentra")
-    st.caption("Your Cloud Assistant")
+    # Display the OCI icon with better quality
+    st.image("OCI_ICON.png", width=250)
     # Collapsible LLM Configuration Section
     with st.expander("🤖 LLM Configuration", expanded=True):
         # Dynamic LLM Provider Selection
@@ -781,12 +760,8 @@ with st.sidebar:
     st.header("📊 Agent Internals")
 
     # Agent Graph visualization
-    if st.checkbox("Show Agent Graph"):
-        agent_graph = st.session_state.get("agent_graph")
-        if agent_graph:
-            draw_graph_matplotlib(agent_graph)
-        else:
-            st.warning("Agent graph not available.")
+    if st.checkbox(" Agent Architecture"):
+        draw_agent_flowchart()
 
 # ============================================================================
 # AMAZON Q STYLE PROGRESS DISPLAY
@@ -1046,8 +1021,16 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                     presentation_object = {
                         "summary": "Process complete.", "format": "chat", "data": []}
             except Exception as e:
+                # Use fast LLM error handler for user-friendly messages
+                from core.fast_error_handler import handle_node_error
+                error_response = handle_node_error(e, final_state, "app_main")
+
                 presentation_object = {
-                    "summary": f"A critical error occurred: {e}", "format": "error", "data": []}
+                    "summary": error_response['user_message'],
+                    "format": "error",
+                    "data": [],
+                    "error_type": error_response['error_type']
+                }
 
             # REMOVED: Human-in-the-loop confirmation for full autonomy
             # All operations now run automatically without user confirmation

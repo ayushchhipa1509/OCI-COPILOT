@@ -35,6 +35,7 @@ def executor_node(state: AgentState) -> dict:
         # Import required modules for code execution
         from oci_ops.clients import get_client, build_config
         import oci
+        from oci.util import to_dict
 
         # Build proper OCI config from credentials
         oci_config = build_config(oci_creds)
@@ -51,6 +52,7 @@ def executor_node(state: AgentState) -> dict:
             'oci': oci,
             'oci_config': oci_config,
             'plan': plan,  # Add plan to execution context
+            'to_dict': to_dict,  # Add to_dict function for OCI object conversion
             # Keep builtins but you might want to restrict in production
             '__builtins__': __builtins__
         }
@@ -76,6 +78,7 @@ def executor_node(state: AgentState) -> dict:
         # Wrap safely as a function to capture results variable.
         wrapped_code = f'''
 def execute_oci_operation():
+    results = []  # Initialize results list
 {_indent_code(oci_code_sanitized, 4)}
     return results if 'results' in locals() else []
 

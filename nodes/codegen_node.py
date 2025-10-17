@@ -4,6 +4,7 @@ import re
 import os
 from core.state import AgentState
 from core.llm_manager import call_llm as default_call_llm
+from core.fast_error_handler import handle_node_error
 
 
 def load_codegen_prompt(service="unknown") -> str:
@@ -386,10 +387,13 @@ def codegen_node(state: AgentState) -> dict:
 
         return {"plan": updated_plan, "last_node": "codegen"}
     except Exception as e:
+        # Use fast LLM error handler
+        error_response = handle_node_error(e, state, "codegen", call_llm_func)
+
         # Fall back to a minimal plan to avoid breaking the chain
         fallback_plan = {"action": action or "unknown_action", "params": params or {}, "service": (
             action and action.split('_')[1]) if isinstance(action, str) else "unknown"}
-        return {"plan": fallback_plan, "plan_error": f"Codegen LLM failed: {e}", "last_node": "codegen"}
+        return {"plan": fallback_plan, "plan_error": error_response['user_message'], "last_node": "codegen"}
 
 
 def _handle_multi_step_codegen(plan: dict, state: AgentState, call_llm_func) -> dict:
@@ -532,6 +536,11 @@ Return ONLY the Python code, no explanations.
     except Exception as e:
         print(
             f"⚠️ Batch optimization failed, falling back to individual generation: {e}")
+
+        # Use fast LLM error handler for logging
+        error_response = handle_node_error(
+            e, state, "codegen_batch", call_llm_func)
+
         return _generate_individual_step_code(steps, state, call_llm_func)
 
 
@@ -644,4 +653,7 @@ def _generate_single_step_code(step_plan: dict, state: AgentState, call_llm_func
         return {"plan": updated_plan}
 
     except Exception as e:
-        return {"plan": None, "plan_error": f"Code generation failed: {e}"}
+        # Use fast LLM error handler
+        error_response = handle_node_error(
+            e, state, "codegen_individual", call_llm_func)
+        return {"plan": None, "plan_error": error_response['user_message']}

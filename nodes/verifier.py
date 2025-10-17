@@ -1,5 +1,6 @@
 # nodes/verifier.py
 from core.state import AgentState
+from core.fast_error_handler import handle_node_error
 
 
 def verifier_node(state: AgentState) -> dict:
@@ -37,11 +38,11 @@ def verifier_node(state: AgentState) -> dict:
     try:
         compile(oci_code, '<string>', 'exec')
         print("✅ Plan syntax is valid.")
-        
+
         # Check if plan requires confirmation before execution
         requires_confirmation = plan.get("requires_confirmation", False)
         safety_tier = plan.get("safety_tier", "safe")
-        
+
         if requires_confirmation or safety_tier == "destructive":
             print("⚠️ Plan requires confirmation before execution")
             return {
@@ -63,9 +64,25 @@ def verifier_node(state: AgentState) -> dict:
                 "last_node": "verifier"
             }
     except SyntaxError as e:
-        critique = f"Generated code has a syntax error: {e}"
+        # Use fast LLM error handler for syntax errors
+        error_response = handle_node_error(
+            e, state, "verifier_syntax", state.get("call_llm"))
+        critique = error_response['user_message']
         print(f"❌ Plan verification failed: {critique}")
         # On failure, update retries and route to presentation node
+        return {
+            "plan_valid": False,
+            "critique": critique,
+            "verify_retries": retries,
+            "next_step": "presentation_node",
+            "last_node": "verifier"
+        }
+    except Exception as e:
+        # Use fast LLM error handler for other errors
+        error_response = handle_node_error(
+            e, state, "verifier_general", state.get("call_llm"))
+        critique = error_response['user_message']
+        print(f"❌ Plan verification failed: {critique}")
         return {
             "plan_valid": False,
             "critique": critique,

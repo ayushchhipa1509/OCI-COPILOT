@@ -26,7 +26,9 @@ def run_all_tests():
         'test_parameter_gathering.py',
         'test_confirmation_flows.py',
         'test_error_handling.py',
-        'test_routing_flows.py'
+        'test_routing_flows.py',
+        'test_delete_parameters.py',
+        'test_delete_real_flow.py'
     ]
 
     results = {}

@@ -2,6 +2,7 @@
 from core.state import AgentState
 from core.prompts import load_prompt
 from core.llm_manager import call_llm as default_call_llm
+from core.fast_error_handler import FastErrorHandler
 from typing import Dict, Any, List
 import json
 # Import the official OCI SDK utility for object-to-dictionary conversion.
@@ -38,6 +39,10 @@ def presentation_node(state: AgentState) -> dict:
     # Handle parameter gathering
     if state.get("parameter_gathering_required"):
         return _handle_parameter_gathering(state)
+
+    # Handle re-prompt for parameter gathering
+    if state.get("re_prompt") and state.get("re_prompt_message"):
+        return _handle_re_prompt(state)
 
     # Handle compartment listing for parameter selection
     if state.get("compartment_listing_complete"):
@@ -365,8 +370,8 @@ No changes have been made to your OCI environment.
     }
 
 
-def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None, call_llm_func=None) -> dict:
-    """Parse user input to extract parameter values using LLM."""
+def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None, call_llm_func=None) -> tuple[bool, dict]:
+    """Parse user input to extract parameter values using LLM. Returns (success, selected_params)."""
     selected_params = {}
 
     # Check if user selected a number for compartment
@@ -377,7 +382,7 @@ def _parse_parameter_response(user_input: str, missing_params: list, compartment
             selected_params['compartment_id'] = selected_compartment.get('id')
             print(
                 f"🔄 User selected compartment #{selection_num}: {selected_compartment.get('name')}")
-            return selected_params
+            return True, selected_params
 
     # Use LLM to extract parameters from natural language
     if call_llm_func and missing_params:
@@ -419,7 +424,7 @@ Respond with JSON:
             if extracted_params:
                 selected_params.update(extracted_params)
                 print(f"🔄 LLM extracted parameters: {selected_params}")
-                return selected_params
+                return True, selected_params
 
         except Exception as e:
             print(f"🔄 LLM parameter extraction failed: {e}")
@@ -447,7 +452,53 @@ Respond with JSON:
             selected_params['compartment_id'] = ocids[0]
             print(f"🔄 Extracted OCID from natural language: {ocids[0]}")
 
-    return selected_params
+    # Determine success based on whether we found any parameters
+    success = len(selected_params) > 0
+    return success, selected_params
+
+
+def _handle_re_prompt(state: AgentState) -> dict:
+    """Handle re-prompting user for parameter information."""
+    re_prompt_message = state.get(
+        "re_prompt_message", "Please provide the required information.")
+    missing_params = state.get("missing_parameters", [])
+    pending_plan = state.get("pending_plan", {})
+
+    # Build a more specific re-prompt message
+    enhanced_message = f"""
+⚠️ **{re_prompt_message}**
+
+**Required Information:**
+{', '.join(missing_params)}
+
+**Please provide the information in this format:**
+"""
+
+    for param in missing_params:
+        if param == "compartment_id":
+            enhanced_message += f"- **{param}**: ocid1.compartment.oc1..your_compartment_ocid\n"
+        elif param == "name":
+            enhanced_message += f"- **{param}**: your_resource_name\n"
+        elif param == "shape":
+            enhanced_message += f"- **{param}**: VM.Standard.E2.1.Micro\n"
+        else:
+            enhanced_message += f"- **{param}**: your_{param}_value\n"
+
+    enhanced_message += """
+**Example Response:**
+compartment_id: ocid1.compartment.oc1..your_compartment_ocid
+name: my-resource-name
+"""
+
+    return {
+        "presentation": {
+            "summary": enhanced_message,
+            "format": "chat",
+            "parameter_gathering_required": True,
+            "missing_parameters": missing_params,
+            "pending_plan": pending_plan
+        }
+    }
 
 
 def _handle_parameter_gathering(state: AgentState) -> dict:
@@ -599,71 +650,47 @@ I need to know which compartment to use for your **{action.replace('_', ' ').upp
 
 
 def _handle_plan_error(state: AgentState, call_llm_func) -> dict:
-    """Handle plan errors with user-friendly messages."""
+    """Handle plan errors with user-friendly messages using enhanced error handler."""
     plan_error = state.get("plan_error", "")
     user_query = state.get("user_input", "")
 
-    # Create user-friendly error messages based on the type of error
-    if "multiple" in plan_error.lower() or "steps" in plan_error.lower():
-        # Handle multiple bucket creation errors
-        friendly_message = f"""I understand you want to create multiple buckets, but I'm having trouble processing that request right now. 
+    # Use the fast error handler
+    try:
+        # Create a mock exception for the plan error
+        class PlanError(Exception):
+            pass
 
-Here are some alternatives you can try:
-• Create one bucket at a time: "create a bucket named ayush_1"
-• List existing buckets: "list buckets" 
-• Try a different approach: "show me my storage resources"
+        error = PlanError(plan_error)
+        error_handler = FastErrorHandler()
+        call_llm_func = state.get("call_llm", default_call_llm)
+        error_response = error_handler.handle_error(
+            error, state, "planning", call_llm_func)
 
-Would you like me to help you create buckets one by one instead?"""
+        # Get the user-friendly message
+        friendly_message = error_response.get(
+            'user_message', 'An error occurred while processing your request.')
 
-    elif "unsupported" in plan_error.lower() or "format" in plan_error.lower():
-        # Handle unsupported plan format errors
-        friendly_message = f"""I'm having trouble understanding your request. Let me help you with a simpler approach:
+        # Add specific suggestions based on error type
+        if "multiple" in plan_error.lower() or "steps" in plan_error.lower():
+            friendly_message += "\n\n**Alternative approaches:**\n• Create one bucket at a time: 'create a bucket named [name]'\n• List existing buckets: 'list buckets'\n• Try a different approach: 'show me my storage resources'"
 
-• For creating resources: "create a bucket named [name]"
-• For listing resources: "list [resource type]"
-• For getting help: "what can you help me with?"
+        elif "unsupported" in plan_error.lower() or "format" in plan_error.lower():
+            friendly_message += "\n\n**Try these simpler commands:**\n• For creating resources: 'create a bucket named [name]'\n• For listing resources: 'list [resource type]'\n• For getting help: 'what can you help me with?'"
 
-Could you try rephrasing your request in a simpler way?"""
+        elif "planner" in plan_error.lower() or "planning" in plan_error.lower():
+            friendly_message += "\n\n**This is a temporary issue our team is working on.**"
 
-    elif "planner" in plan_error.lower() or "planning" in plan_error.lower() or "required_params" in plan_error.lower():
-        # Handle planner errors
-        friendly_message = f"""I'm having trouble planning your request right now. This is a temporary issue that our team is working on.
+        elif "codegen" in plan_error.lower() or "llm" in plan_error.lower():
+            friendly_message += "\n\n**Try these alternatives:**\n• Simplify your request: 'create a bucket named test-bucket'\n• Check your OCI credentials are properly configured\n• Try a different type of operation: 'list compartments'"
 
-Here are some things you can try:
-• **Simple operations**: "list buckets", "list compartments"
-• **Basic creation**: "create a bucket named test-bucket"
-• **Try again in a moment**: The system might be busy
+        elif "keyerror" in plan_error.lower() or "cannot access" in plan_error.lower():
+            friendly_message += "\n\n**This is a technical issue our team is working on.**"
 
-Sorry for the inconvenience! Our team is working to improve this functionality."""
+        else:
+            friendly_message += "\n\n**Try these approaches:**\n• Break down complex requests into simpler ones\n• Make sure you've provided all necessary details\n• Try a different type of operation"
 
-    elif "codegen" in plan_error.lower() or "llm" in plan_error.lower():
-        # Handle code generation errors
-        friendly_message = f"""I'm having trouble generating the code for your request. This might be due to:
-
-• Complex requirements that need to be broken down
-• Missing information needed for the operation
-• Temporary processing issues
-
-Try these alternatives:
-• Simplify your request: "create a bucket named test-bucket"
-• Check your OCI credentials are properly configured
-• Try a different type of operation: "list compartments"
-
-Would you like to try a simpler request?"""
-
-    elif "keyerror" in plan_error.lower() or "cannot access" in plan_error.lower() or "variable" in plan_error.lower():
-        # Handle technical errors
-        friendly_message = f"""I'm experiencing a technical issue right now. Our team is aware of this and working on a fix.
-
-In the meantime, you can try:
-• **Simple operations**: "list buckets", "list compartments"
-• **Basic tasks**: "create a bucket named test-bucket"
-• **Try again later**: The issue should be resolved soon
-
-Sorry for the inconvenience! We're working to improve the system."""
-
-    else:
-        # Generic error handling
+    except Exception as e:
+        # Fallback to basic error message
         friendly_message = f"""I encountered an issue processing your request. This can happen when:
 
 • The request is too complex for me to handle
