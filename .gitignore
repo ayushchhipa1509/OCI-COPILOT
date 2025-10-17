@@ -198,14 +198,11 @@ embeddings/
 session_*
 *.session
 
-# Test files (keep test structure but ignore temporary test files)
+# Test files (ignore all test files and directories)
 test_*.py
 *_test.py
-# Keep tests/ directory structure but ignore temp files
-tests/temp/
-tests/cache/
-tests/*.tmp
-tests/*.temp
+tests/
+tests/*
 archive/
 archives/
 
@@ -227,6 +224,8 @@ dev_config.py
 
 # Memory and conversation files
 memory/
+!core/memory/
+!core/memory/*.py
 conversation_history.json
 *.json.bak
 
