@@ -41,9 +41,14 @@ def normalizer_node(state: AgentState) -> dict:
         normalized_query = response_json.get("normalized_query", user_input)
 
         print(f"✅ Normalizer corrected query: '{normalized_query}'")
+        print(f"🔍 Normalizer response JSON: {response_json}")
 
         # Check if query is executable (OCI operation) or non-executable (chat/question)
         is_executable = response_json.get("is_executable", False)
+        intent = response_json.get("intent", "unknown")
+
+        print(f"🔍 Is executable: {is_executable}")
+        print(f"🔍 Intent: {intent}")
 
         if not is_executable:
             print("🔄 Non-executable query detected, routing to presentation")

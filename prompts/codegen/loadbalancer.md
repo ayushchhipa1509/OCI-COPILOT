@@ -118,22 +118,32 @@ create_load_balancer_details = oci.load_balancer.models.CreateLoadBalancerDetail
     }
 )
 
-# Create the load balancer
+# Create the load balancer with error handling
 # This is an asynchronous operation, so we get a work request ID back
-create_load_balancer_response = loadbalancer_client.create_load_balancer(
-    create_load_balancer_details=create_load_balancer_details
-)
+try:
+    create_load_balancer_response = loadbalancer_client.create_load_balancer(
+        create_load_balancer_details=create_load_balancer_details
+    )
 
-# For asynchronous operations, we can wait for the work request to succeed
-work_request_id = create_load_balancer_response.headers['opc-work-request-id']
-oci.wait_until(loadbalancer_client, loadbalancer_client.get_work_request(work_request_id), 'lifecycle_state', 'SUCCEEDED')
+    # For asynchronous operations, we can wait for the work request to succeed
+    work_request_id = create_load_balancer_response.headers['opc-work-request-id']
+    oci.wait_until(loadbalancer_client, loadbalancer_client.get_work_request(work_request_id), 'lifecycle_state', 'SUCCEEDED')
 
-# After waiting, get the load balancer details using the ID from the work request
-lb_ocid = loadbalancer_client.get_work_request(work_request_id).data.load_balancer_id
-load_balancer = loadbalancer_client.get_load_balancer(lb_ocid).data
+    # After waiting, get the load balancer details using the ID from the work request
+    lb_ocid = loadbalancer_client.get_work_request(work_request_id).data.load_balancer_id
+    load_balancer = loadbalancer_client.get_load_balancer(lb_ocid).data
 
-# Append the final resource details (as a dictionary) to the results
-results.append(to_dict(load_balancer))
+    # Append the final resource details to results
+    results.append(to_dict(load_balancer))
+
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_load_balancer',
+        'display_name': display_name,
+        'status': 'error',
+        'message': f'Failed to create load balancer: {e.message}'
+    })
 ```
 
 ## Key Points

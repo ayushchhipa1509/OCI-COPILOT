@@ -36,6 +36,10 @@ def presentation_node(state: AgentState) -> dict:
     if state.get("action_cancelled"):
         return _handle_action_cancellation(state)
 
+    # Handle resumption prompt
+    if state.get("prompt_for_resumption") and state.get("deferred_plan"):
+        return _handle_resumption_prompt(state)
+
     # Handle parameter gathering
     if state.get("parameter_gathering_required"):
         return _handle_parameter_gathering(state)
@@ -370,6 +374,31 @@ No changes have been made to your OCI environment.
     }
 
 
+def _handle_resumption_prompt(state: AgentState) -> dict:
+    """Handle prompting user to resume a deferred plan."""
+    deferred_plan = state.get("deferred_plan", {})
+    action = deferred_plan.get("action", "your previous request")
+    service = deferred_plan.get("service", "unknown service")
+
+    # Build the resumption message
+    resumption_message = f"""
+🔄 **RESUMING YOUR ORIGINAL REQUEST**
+
+You were previously trying to **{action.replace('_', ' ').upper()}** in the **{service}** service.
+
+Would you like to continue with that now? (yes/no)
+"""
+
+    return {
+        "presentation": {
+            "summary": resumption_message,
+            "format": "chat",
+            "waiting_for_resumption_response": True
+        },
+        "next_step": "user_input_required"
+    }
+
+
 def _parse_parameter_response(user_input: str, missing_params: list, compartment_data: list = None, call_llm_func=None) -> tuple[bool, dict]:
     """Parse user input to extract parameter values using LLM. Returns (success, selected_params)."""
     selected_params = {}
@@ -430,15 +459,34 @@ Respond with JSON:
             print(f"🔄 LLM parameter extraction failed: {e}")
 
     # Fallback to simple parsing if LLM fails
-    lines = user_input.split('\n')
-    for line in lines:
-        line = line.strip()
-        if ':' in line:
-            key, value = line.split(':', 1)
-            key = key.strip()
-            value = value.strip()
-            if key in missing_params:
-                selected_params[key] = value
+    print("🔄 LLM parsing failed, using fallback parsing")
+
+    # Simple regex-based parsing for key:value pairs
+    import re
+
+    # Pattern to match key:value pairs
+    pattern = r'(\w+):\s*([^:]+?)(?=\s+\w+:|$)'
+    matches = re.findall(pattern, user_input)
+
+    for key, value in matches:
+        key = key.strip()
+        value = value.strip()
+        if key in missing_params:
+            selected_params[key] = value
+            print(f"🔄 Fallback parsed: {key} = {value}")
+
+    # If still no parameters found, try simple colon splitting
+    if not selected_params:
+        lines = user_input.split('\n')
+        for line in lines:
+            line = line.strip()
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                if key in missing_params:
+                    selected_params[key] = value
+                    print(f"🔄 Fallback parsed (line): {key} = {value}")
 
     # If no parameters found with colon format, try to extract OCIDs from natural language
     if not selected_params and missing_params:
@@ -458,34 +506,62 @@ Respond with JSON:
 
 
 def _handle_re_prompt(state: AgentState) -> dict:
-    """Handle re-prompting user for parameter information."""
+    """Handle re-prompting user for parameter information using LLM intelligence."""
     re_prompt_message = state.get(
         "re_prompt_message", "Please provide the required information.")
     missing_params = state.get("missing_parameters", [])
     pending_plan = state.get("pending_plan", {})
+    call_llm_func = state.get("call_llm", default_call_llm)
 
-    # Build a more specific re-prompt message
-    enhanced_message = f"""
+    # Get context for LLM
+    action = pending_plan.get("action", "unknown action")
+    service = pending_plan.get("service", "unknown service")
+    user_query = state.get("user_input", "")
+
+    # Use LLM to generate intelligent re-prompt message
+    try:
+        re_prompt_prompt = f"""
+You are an intelligent OCI assistant helping users provide missing parameters for cloud operations.
+
+Context:
+- User Query: "{user_query}"
+- Action: {action}
+- Service: {service}
+- Missing Parameters: {missing_params}
+- Re-prompt Reason: {re_prompt_message}
+
+The user's previous response was incomplete or unclear. Generate a helpful, conversational re-prompt message that:
+1. Acknowledges their attempt to provide information
+2. Clearly explains what's still missing
+3. Provides specific, context-aware guidance for each missing parameter
+4. Shows relevant examples based on the service type
+5. Suggests ways to find the information
+6. Makes it feel like a helpful conversation, not a form
+
+Be encouraging and specific about what they need to provide.
+"""
+
+        messages = [
+            {"role": "system", "content": re_prompt_prompt},
+            {"role": "user", "content": f"Generate a re-prompt message for: {action} in {service} service"}
+        ]
+
+        enhanced_message = call_llm_func(state, messages, "presentation_node")
+
+        print(
+            f"🧠 LLM-generated re-prompt message: {enhanced_message[:200]}...")
+
+    except Exception as e:
+        print(f"⚠️ LLM re-prompt failed: {e}, using fallback")
+
+        # Fallback to simple message
+        enhanced_message = f"""
 ⚠️ **{re_prompt_message}**
 
 **Required Information:**
 {', '.join(missing_params)}
 
 **Please provide the information in this format:**
-"""
-
-    for param in missing_params:
-        if param == "compartment_id":
-            enhanced_message += f"- **{param}**: ocid1.compartment.oc1..your_compartment_ocid\n"
-        elif param == "name":
-            enhanced_message += f"- **{param}**: your_resource_name\n"
-        elif param == "shape":
-            enhanced_message += f"- **{param}**: VM.Standard.E2.1.Micro\n"
-        else:
-            enhanced_message += f"- **{param}**: your_{param}_value\n"
-
-    enhanced_message += """
-**Example Response:**
 compartment_id: ocid1.compartment.oc1..your_compartment_ocid
 name: my-resource-name
 """
@@ -502,83 +578,65 @@ name: my-resource-name
 
 
 def _handle_parameter_gathering(state: AgentState) -> dict:
-    """Handle parameter gathering for deployment operations."""
+    """Handle parameter gathering for deployment operations using LLM intelligence."""
     pending_plan = state.get("pending_plan", {})
     missing_params = state.get("missing_parameters", [])
+    call_llm_func = state.get("call_llm", default_call_llm)
 
-    # Handle multi-step plans
-    if "steps" in pending_plan and isinstance(pending_plan.get("steps"), list):
-        # For multi-step plans, find the main destructive action
-        steps = pending_plan.get("steps", [])
-        main_action = "unknown action"
-        main_service = "unknown service"
+    # Get context for LLM
+    action = pending_plan.get("action", "unknown action")
+    service = pending_plan.get("service", "unknown service")
+    user_query = state.get("user_input", "")
 
-        # Look for the destructive action (usually the last step)
-        for step in steps:
-            if step.get("safety_tier") == "destructive" or step.get("requires_confirmation"):
-                main_action = step.get("action", "unknown action")
-                main_service = step.get("service", "unknown service")
-                break
+    # Check if we're resuming after completing a prerequisite
+    is_resuming = state.get("resumed_after_prerequisite", False)
 
-        # If no destructive action found, use the last step
-        if main_action == "unknown action" and steps:
-            last_step = steps[-1]
-            main_action = last_step.get("action", "unknown action")
-            main_service = last_step.get("service", "unknown service")
+    # Use LLM to generate intelligent parameter gathering message
+    try:
+        parameter_gathering_prompt = f"""
+You are an intelligent OCI assistant helping users provide missing parameters for cloud operations.
 
-        action = main_action
-        service = main_service
-    else:
-        # For single-step plans
-        action = pending_plan.get("action", "unknown action")
-        service = pending_plan.get("service", "unknown service")
+Context:
+- User Query: "{user_query}"
+- Action: {action}
+- Service: {service}
+- Missing Parameters: {missing_params}
+- Is Resuming: {is_resuming}
 
-    # Build parameter gathering message
-    gathering_message = f"""
+Generate a helpful, conversational message that:
+1. Explains what operation they're trying to perform
+2. Clearly identifies what information is still needed
+3. Provides context-aware guidance for each missing parameter
+4. Shows relevant examples based on the service type
+5. Suggests ways to find the information (like "list compartments")
+6. Makes it feel like a helpful conversation, not a form
+
+Be specific about why each parameter is needed and provide service-appropriate examples.
+"""
+
+        messages = [
+            {"role": "system", "content": parameter_gathering_prompt},
+            {"role": "user", "content": f"Generate a parameter gathering message for: {action} in {service} service"}
+        ]
+
+        gathering_message = call_llm_func(state, messages, "presentation_node")
+
+        print(
+            f"🧠 LLM-generated parameter gathering message: {gathering_message[:200]}...")
+
+    except Exception as e:
+        print(f"⚠️ LLM parameter gathering failed: {e}, using fallback")
+
+        # Fallback to simple message
+        gathering_message = f"""
 🔧 **PARAMETER GATHERING REQUIRED**
 
 I need additional information to complete your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
 
-**Missing Parameters:**
-{', '.join(missing_params)}
+**Missing Parameters:** {', '.join(missing_params)}
 
-Please provide the missing information:
-"""
-
-    # Add specific guidance based on missing parameters
-    if "compartment_id" in missing_params:
-        gathering_message += """
-**For Compartment Selection:**
-Please provide the compartment OCID where you want to create the resource.
-You can find compartment OCIDs by running: "list compartments"
-"""
-
-    if "shape" in missing_params:
-        gathering_message += """
-**For Instance Shape:**
-Please provide the shape name (e.g., "VM.Standard.E2.1.Micro").
-You can find available shapes by running: "list shapes"
-"""
-
-    if "image_id" in missing_params:
-        gathering_message += """
-**For Instance Image:**
-Please provide the image OCID (e.g., "ocid1.image.oc1...").
-You can find available images by running: "list images"
-"""
-
-    if "subnet_id" in missing_params:
-        gathering_message += """
-**For Subnet Selection:**
-Please provide the subnet OCID where you want to create the resource.
-You can find subnet OCIDs by running: "list subnets"
-"""
-
-    gathering_message += """
-**Example Response:**
+Please provide the missing information in this format:
 compartment_id: ocid1.compartment.oc1..your_compartment_ocid
-shape: VM.Standard.E2.1.Micro
-image_id: ocid1.image.oc1..your_image_ocid
 """
 
     return {
@@ -588,24 +646,60 @@ image_id: ocid1.image.oc1..your_image_ocid
             "parameter_gathering_required": True,
             "missing_parameters": missing_params,
             "pending_plan": pending_plan
-        }
+        },
+        "next_step": "user_input_required"  # CRITICAL: Signal that we need user input
     }
 
 
 def _handle_compartment_selection(state: AgentState) -> dict:
-    """Handle compartment selection with numbered list."""
+    """Handle compartment selection using LLM intelligence."""
     pending_plan = state.get("pending_plan", {})
     missing_params = state.get("missing_parameters", [])
     action = pending_plan.get("action", "unknown action")
     service = pending_plan.get("service", "unknown service")
+    call_llm_func = state.get("call_llm", default_call_llm)
 
     # Get the execution result (compartment list)
     execution_result = state.get("execution_result", {})
     compartment_data = execution_result.get("data", [])
 
-    if not compartment_data:
-        # Fallback if no compartments found
-        selection_message = f"""
+    # Use LLM to generate intelligent compartment selection message
+    try:
+        compartment_selection_prompt = f"""
+You are an intelligent OCI assistant helping users select compartments for cloud operations.
+
+Context:
+- Action: {action}
+- Service: {service}
+- Available Compartments: {len(compartment_data)} compartments found
+- Compartment Data: {compartment_data[:3] if compartment_data else "None"}
+
+Generate a helpful, conversational message that:
+1. Explains why compartment selection is needed
+2. If compartments are available, presents them in a user-friendly numbered list
+3. If no compartments found, explains how to provide the OCID manually
+4. Provides clear instructions on how to respond
+5. Makes it feel like a helpful conversation
+
+Be specific about the operation they're trying to perform and why compartment selection matters.
+"""
+
+        messages = [
+            {"role": "system", "content": compartment_selection_prompt},
+            {"role": "user", "content": f"Generate a compartment selection message for: {action} in {service} service"}
+        ]
+
+        selection_message = call_llm_func(state, messages, "presentation_node")
+
+        print(
+            f"🧠 LLM-generated compartment selection message: {selection_message[:200]}...")
+
+    except Exception as e:
+        print(f"⚠️ LLM compartment selection failed: {e}, using fallback")
+
+        # Fallback to simple message
+        if not compartment_data:
+            selection_message = f"""
 🔧 **COMPARTMENT SELECTION REQUIRED**
 
 I need to know which compartment to use for your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
@@ -615,9 +709,8 @@ Unfortunately, I couldn't retrieve the list of compartments. Please provide the 
 **Example Response:**
 compartment_id: ocid1.compartment.oc1..your_compartment_ocid
 """
-    else:
-        # Create numbered list of compartments
-        selection_message = f"""
+        else:
+            selection_message = f"""
 🔧 **COMPARTMENT SELECTION REQUIRED**
 
 I need to know which compartment to use for your **{action.replace('_', ' ').upper()}** operation in the **{service}** service.
@@ -625,12 +718,12 @@ I need to know which compartment to use for your **{action.replace('_', ' ').upp
 **Available Compartments:**
 """
 
-        for i, compartment in enumerate(compartment_data, 1):
-            name = compartment.get('name', 'Unknown')
-            ocid = compartment.get('id', 'Unknown OCID')
-            selection_message += f"{i}. **{name}** (`{ocid}`)\n"
+            for i, compartment in enumerate(compartment_data, 1):
+                name = compartment.get('name', 'Unknown')
+                ocid = compartment.get('id', 'Unknown OCID')
+                selection_message += f"{i}. **{name}** (`{ocid}`)\n"
 
-        selection_message += """
+            selection_message += """
 **Please select by number or provide compartment details:**
 - Type the number (e.g., `1`) to select a compartment
 - Or provide: `compartment_id: ocid1.compartment.oc1..your_ocid`
@@ -645,7 +738,8 @@ I need to know which compartment to use for your **{action.replace('_', ' ').upp
             "missing_parameters": missing_params,
             "pending_plan": pending_plan
         },
-        "compartment_data": compartment_data  # Store in state for supervisor access
+        "compartment_data": compartment_data,  # Store in state for supervisor access
+        "next_step": "user_input_required"  # CRITICAL: Signal that we need user input
     }
 
 

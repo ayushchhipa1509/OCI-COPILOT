@@ -98,3 +98,63 @@ compartment_id = plan['params'].get('compartment_id')  # No fallback for CREATE 
 compartment_id = oci_config['compartment_id']  # ❌ DON'T DO THIS
 bucket_name = oci_config['name']  # ❌ DON'T DO THIS
 ```
+
+## 🛡️ CRITICAL: Error Handling for CREATE Operations
+
+**MANDATORY - All CREATE operations MUST include try-except blocks:**
+
+```python
+# Generic CREATE pattern with error handling
+try:
+    # Extract parameters from plan
+    resource_name = plan['params'].get('name')
+    compartment_id = plan['params'].get('compartment_id')
+
+    # Create the Details object
+    create_details = oci.service.models.CreateResourceDetails(
+        name=resource_name,
+        compartment_id=compartment_id
+    )
+
+    # Make the API call
+    response = client.create_resource(create_resource_details=create_details)
+
+    # Append success result
+    results.append(to_dict(response.data))
+
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_resource',
+        'name': resource_name,
+        'status': 'error',
+        'message': f'Failed to create resource: {e.message}'
+    })
+```
+
+**For asynchronous operations (VCN, Load Balancer, etc.), also wrap oci.wait_until:**
+
+```python
+try:
+    # Create the resource
+    create_response = client.create_resource(create_resource_details=create_details)
+    resource_ocid = create_response.data.id
+
+    # Wait for completion
+    final_response = oci.wait_until(
+        client,
+        client.get_resource(resource_ocid),
+        'lifecycle_state',
+        'AVAILABLE'
+    )
+
+    results.append(to_dict(final_response.data))
+
+except oci.exceptions.ServiceError as e:
+    results.append({
+        'action': 'create_resource',
+        'name': resource_name,
+        'status': 'error',
+        'message': f'Failed to create resource: {e.message}'
+    })
+```

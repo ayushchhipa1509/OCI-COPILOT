@@ -153,6 +153,114 @@ while response.has_next_page:
         results.append(to_dict(compartment))
 ```
 
+### 8. Create Action: `create_compartment`
+
+When the plan action is `create_compartment`, you must generate code to create a new compartment. The parameters will be provided in the plan.
+
+```python
+from oci.util import to_dict
+
+# Extract details from the plan's params
+compartment_name = plan['params'].get('name')
+compartment_description = plan['params'].get('description')
+parent_compartment_id = plan['params'].get('compartment_id')  # Parent compartment (usually tenancy)
+
+# Define the details for the new compartment
+create_compartment_details = oci.identity.models.CreateCompartmentDetails(
+    name=compartment_name,
+    description=compartment_description,
+    compartment_id=parent_compartment_id
+)
+
+# Create the compartment with error handling
+try:
+    created_compartment_response = identity_client.create_compartment(
+        create_compartment_details=create_compartment_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(created_compartment_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_compartment',
+        'name': compartment_name,
+        'status': 'error',
+        'message': f'Failed to create compartment: {e.message}'
+    })
+```
+
+### 9. Create Action: `create_group`
+
+When the plan action is `create_group`, you must generate code to create a new group. The parameters will be provided in the plan.
+
+```python
+from oci.util import to_dict
+
+# Extract details from the plan's params
+group_name = plan['params'].get('name')
+group_description = plan['params'].get('description')
+compartment_id = plan['params'].get('compartment_id')  # Usually tenancy OCID
+
+# Define the details for the new group
+create_group_details = oci.identity.models.CreateGroupDetails(
+    name=group_name,
+    description=group_description,
+    compartment_id=compartment_id
+)
+
+# Create the group with error handling
+try:
+    created_group_response = identity_client.create_group(
+        create_group_details=create_group_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(created_group_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_group',
+        'name': group_name,
+        'status': 'error',
+        'message': f'Failed to create group: {e.message}'
+    })
+```
+
+### 10. Create Action: `create_user`
+
+When the plan action is `create_user`, you must generate code to create a new user. The parameters will be provided in the plan.
+
+```python
+from oci.util import to_dict
+
+# Extract details from the plan's params
+user_name = plan['params'].get('name')  # Usually email address
+user_description = plan['params'].get('description')
+compartment_id = plan['params'].get('compartment_id')  # Usually tenancy OCID
+
+# Define the details for the new user
+create_user_details = oci.identity.models.CreateUserDetails(
+    name=user_name,
+    description=user_description,
+    compartment_id=compartment_id
+)
+
+# Create the user with error handling
+try:
+    created_user_response = identity_client.create_user(
+        create_user_details=create_user_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(created_user_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_user',
+        'name': user_name,
+        'status': 'error',
+        'message': f'Failed to create user: {e.message}'
+    })
+```
+
 ## Key Points
 
 - Users and groups are tenancy-scoped, not compartment-scoped
@@ -160,3 +268,5 @@ while response.has_next_page:
 - Policy statements are stored as a list of strings
 - Always implement pagination for all list operations
 - Handle service errors gracefully with try/except blocks
+- **CRITICAL**: For CREATE operations, all parameters must come from `plan['params']`
+- **NEVER** use fallback values from `oci_config` for required parameters in create operations

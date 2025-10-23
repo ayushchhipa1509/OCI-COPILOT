@@ -271,13 +271,17 @@ namespace = objectstorage_client.get_namespace().data
 # Extract details from the plan's params
 bucket_name = plan['params'].get('name')
 compartment_id = plan['params'].get('compartment_id')
+public_access = plan['params'].get('public_access', False)
+
+# Determine public access type based on user preference
+public_access_type = 'ObjectRead' if public_access else 'NoPublicAccess'
 
 # Define the details for the new bucket
 create_bucket_details = oci.object_storage.models.CreateBucketDetails(
     name=bucket_name,
     compartment_id=compartment_id,
-    # CIS Benchmark 5.1.1: Ensure buckets are not publicly visible by default
-    public_access_type='NoPublicAccess',
+    # Use user-specified public access preference
+    public_access_type=public_access_type,
     storage_tier='Standard',
     # CIS Benchmark 5.1.3: Ensure versioning is enabled to protect against overwrites and deletions
     versioning='Enabled'
@@ -285,14 +289,22 @@ create_bucket_details = oci.object_storage.models.CreateBucketDetails(
     # This can be added via the 'kms_key_id' parameter if a key OCID is provided.
 )
 
-# Create the bucket
-created_bucket_response = objectstorage_client.create_bucket(
-    namespace_name=namespace,
-    create_bucket_details=create_bucket_details
-)
-
-# Append the created resource details (as a dictionary) to the results
-results.append(to_dict(created_bucket_response.data))
+# Create the bucket with error handling
+try:
+    created_bucket_response = objectstorage_client.create_bucket(
+        namespace_name=namespace,
+        create_bucket_details=create_bucket_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(created_bucket_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_bucket',
+        'name': bucket_name,
+        'status': 'error',
+        'message': f'Failed to create bucket: {e.message}'
+    })
 ```
 
 ### 6. Delete Action: `delete_bucket`

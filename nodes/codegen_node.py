@@ -136,6 +136,12 @@ def codegen_node(state: AgentState) -> dict:
     plan = state.get("plan")
     call_llm_func = state.get("call_llm", default_call_llm)
 
+    print(f"🔍 DEBUG: Plan received in codegen:")
+    print(f"   - Plan keys: {list(plan.keys()) if plan else 'None'}")
+    print(f"   - Action: {plan.get('action') if plan else 'None'}")
+    print(f"   - Service: {plan.get('service') if plan else 'None'}")
+    print(f"   - Params: {plan.get('params') if plan else 'None'}")
+
     if not plan:
         return {"plan": None, "plan_error": "No plan provided to codegen_node.", "last_node": "codegen"}
 
@@ -384,6 +390,11 @@ def codegen_node(state: AgentState) -> dict:
         print("+" * 60)
         print("⚙️ CODEGEN NODE - COMPLETED")
         print("+" * 60)
+
+        # DEBUG: Log generated code for delete operations
+        if action and 'delete' in action.lower():
+            print(f"🔍 DEBUG: Generated code for {action}:")
+            print(f"```python\n{oci_code}\n```")
 
         return {"plan": updated_plan, "last_node": "codegen"}
     except Exception as e:

@@ -142,6 +142,9 @@ def init_session():
         st.session_state['chat_history'] = []
     if 'session_id' not in st.session_state:
         st.session_state['session_id'] = str(hash(time.time()))
+    if 'current_agent_state' not in st.session_state:
+        # Store the full state here
+        st.session_state['current_agent_state'] = {}
 
 
 def perform_master_scan(state):
@@ -288,36 +291,6 @@ def draw_agent_flowchart():
         visualizer = GraphVisualizer()
         fig = visualizer.draw_graph()  # This calls the draw_graph method from the class
         st.pyplot(fig)
-
-        # Show additional information
-        st.markdown("---")
-        st.subheader("📋 Agent Architecture Details")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("### 🧠 Memory System")
-            st.markdown("""
-            - **Memory Context**: Loads user preferences and conversation history
-            - **Memory Manager**: Saves learning patterns and user preferences
-            - **Contextual Awareness**: Provides intelligent suggestions
-            """)
-
-        with col2:
-            st.markdown("### ⚙️ Processing Chain")
-            st.markdown("""
-            - **Supervisor**: Central orchestrator and decision maker
-            - **Normalizer**: Query analysis and routing
-            - **Planner**: Multi-step plan generation
-            - **Codegen**: Code generation with optimization
-            """)
-
-        st.markdown("### 🔄 Self-Correction Loops")
-        st.markdown("""
-        - **Syntax Error Loop**: Verifier → Supervisor → Codegen (retry)
-        - **Runtime Error Loop**: Executor → Supervisor → Codegen (retry)
-        - **Smart Fallback**: RAG → Planner (when no cached data)
-        """)
 
     except Exception as e:
         st.error(f"❌ An error occurred while drawing the agent flowchart: {e}")
@@ -869,6 +842,18 @@ def _update_progress_display(placeholder, current_node):
         placeholder.markdown(display_text)
 
 
+# --- Main Content Area ---
+# Display small logo and name in a single row
+col1, col2 = st.columns([1, 10])
+with col1:
+    st.image("oci_only.jpg", width=50)
+with col2:
+    st.markdown("""
+    <h1 style="color: #FF6B35; font-size: 2em; margin: 0; display: inline;">OCI COPILOT</h1>
+    """, unsafe_allow_html=True)
+
+st.divider()
+
 # --- Main Chat Logic ---
 render_chat_history()
 if st.session_state.get("last_response"):
@@ -883,30 +868,68 @@ if st.session_state.get("last_response"):
             download_buttons(df)
     st.session_state.last_response = None
 
-if prompt := st.chat_input("Ask CloudAgentra..."):
+if prompt := st.chat_input("Ask OCI COPILOT..."):
     append_chat("user", prompt)
-    st.rerun()
 
-if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'user':
-    user_input = st.session_state.chat_history[-1][1]
+    # *** IMPORTANT: Store the new prompt but decide how to use it later ***
+    st.session_state['new_user_input'] = prompt
 
-    # Check if this is a confirmation response
-    if st.session_state.get('confirmation_required'):
-        # Handle confirmation response
-        st.session_state['confirmation_response'] = user_input
-        st.session_state['confirmation_required'] = False
-        # Continue with the graph execution
-    elif st.session_state.get('parameter_gathering_required') or st.session_state.get('compartment_selection_required'):
-        # Handle parameter selection response
-        st.session_state['parameter_selection_response'] = user_input
-        st.session_state['parameter_gathering_required'] = False
-        st.session_state['compartment_selection_required'] = False
-        # Continue with the graph execution
-    else:
-        # Reset previous response when new query is submitted
-        if 'last_response' in st.session_state:
-            del st.session_state['last_response']
-        if 'node_status' in st.session_state:
+    # DON'T reset flags like 'confirmation_required' here anymore.
+    # Let the graph logic handle it properly.
+
+    st.rerun()  # Rerun to display the user message immediately
+
+# --- Agent Processing Logic (Runs after user input is displayed) ---
+# Check if there's new input AND we haven't already processed it
+should_run_agent = 'new_user_input' in st.session_state and not st.session_state.get(
+    'agent_processing', False)
+
+# Debug logging
+if 'new_user_input' in st.session_state:
+    print(
+        f"🔍 DEBUG: new_user_input exists: {st.session_state.get('new_user_input')}")
+    print(
+        f"🔍 DEBUG: agent_processing flag: {st.session_state.get('agent_processing', False)}")
+    print(f"🔍 DEBUG: should_run_agent: {should_run_agent}")
+
+# Only run the agent if there's NEW user input and we haven't processed it yet
+# Don't run if the agent is already waiting for user response
+if should_run_agent and (not st.session_state.chat_history or st.session_state.chat_history[-1][0] == 'user'):
+    # Set processing flag to prevent double execution
+    st.session_state['agent_processing'] = True
+
+    # Get the latest user input IF IT EXISTS for this turn
+    user_input_for_this_turn = st.session_state.pop('new_user_input', None)
+
+    # *** CORE STATE LOGIC ***
+    # Start with the state saved from the PREVIOUS turn (holds pending_plan etc.)
+    current_state = st.session_state.get('current_agent_state', {}).copy()
+
+    # If there was NEW user input this turn, add it to the state
+    if user_input_for_this_turn:
+        current_state['user_input'] = user_input_for_this_turn
+        # If this new input is a response to a previous question, label it
+        if current_state.get('parameter_gathering_required') or current_state.get('compartment_selection_required'):
+            current_state['parameter_selection_response'] = user_input_for_this_turn
+        elif current_state.get('confirmation_required'):
+            current_state['confirmation_response'] = user_input_for_this_turn
+        elif current_state.get('waiting_for_resumption_response'):
+            # This is a response to the resumption prompt (yes/no)
+            # The supervisor will handle this directly via user_input
+            pass
+        else:
+            # It's a genuinely new query, clear any leftover pending state
+            current_state.pop('pending_plan', None)
+            current_state.pop('missing_parameters', None)
+            current_state.pop('parameter_gathering_required', None)
+            current_state.pop('confirmation_required', None)
+            current_state.pop('parameter_selection_response', None)
+            current_state.pop('confirmation_response', None)
+            # Clear compartment data from previous queries
+            current_state.pop('compartment_data', None)
+            # Clear execution results from previous queries
+            current_state.pop('execution_result', None)
+            # Reset node status for a new query
             st.session_state['node_status'] = {}
 
     with st.chat_message("assistant"):
@@ -949,37 +972,26 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
             st.stop()
 
         with st.spinner("Processing..."):
-            initial_state: AgentState = {
-                "user_input": user_input,
+            # --- Prepare state for the graph ---
+            # Merge base session info into the current_state
+            current_state.update({
                 "session_id": st.session_state.session_id,
                 "oci_creds": st.session_state.get('oci_creds', {}),
                 "llm_preference": st.session_state.get('llm_preference', {}),
                 "call_llm": call_llm,
                 "db_path": ".oci_agent.sqlite",
                 "chat_history": [msg for role, msg in st.session_state.chat_history],
-                # Add toggle state
                 "use_rag_chain": st.session_state.get('use_rag_chain', False),
-                "plan": None,
-                # Initialize recursion safety
-                "recursion_count": 0,
+                "recursion_count": 0,  # Reset recursion count for each invocation
                 "max_recursion": 20,
-                "plan_error": None,
-                "plan_valid": False,
-                "verify_retries": 0,
-                "rag_found": False,
-                "rag_result": [],
-                "rag_metadata": [],
-                "feedback": None,
-                # Add confirmation state
-                "confirmation_required": st.session_state.get('confirmation_required', False),
-                "confirmation_response": st.session_state.get('confirmation_response'),
-                "pending_plan": st.session_state.get('pending_plan'),
-                # Add parameter gathering state
-                "parameter_gathering_required": st.session_state.get('parameter_gathering_required', False),
-                "parameter_selection_response": st.session_state.get('parameter_selection_response'),
-                "compartment_selection_required": st.session_state.get('compartment_selection_required', False),
-                "compartment_data": st.session_state.get('compartment_data', []),
-            }
+                # Ensure flags are correctly carried over
+                "confirmation_required": current_state.get('confirmation_required', False),
+                "parameter_gathering_required": current_state.get('parameter_gathering_required', False),
+                "compartment_selection_required": current_state.get('compartment_selection_required', False),
+            })
+
+            # Use current_state as the initial state
+            initial_state: AgentState = current_state
 
             final_state = {}
             presentation_object = {}
@@ -1012,6 +1024,10 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                         # Debug: show state evolution
                         print(f"DEBUG: Updated state → {final_state}\n")
 
+                # --- Process Final State ---
+                # ** CRITICAL: Save the entire final state for the next turn **
+                st.session_state['current_agent_state'] = final_state.copy()
+
                 if final_state.get("presentation"):
                     presentation_object = final_state.get("presentation")
                 elif final_state.get("general_chat"):
@@ -1020,6 +1036,49 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                 else:
                     presentation_object = {
                         "summary": "Process complete.", "format": "chat", "data": []}
+
+                # Check if the graph ended because it's waiting for user input
+                is_waiting = final_state.get('parameter_gathering_required') or \
+                    final_state.get('confirmation_required') or \
+                    final_state.get('compartment_selection_required') or \
+                    final_state.get('next_step') == 'user_input_required'
+
+                # Clear specific response fields after processing, *before* saving for next turn
+                # BUT ONLY if the turn is complete (not waiting for input)
+                if not is_waiting:
+                    st.session_state['current_agent_state'].pop(
+                        'parameter_selection_response', None)
+                    st.session_state['current_agent_state'].pop(
+                        'confirmation_response', None)
+
+                # Update chat history with the assistant's response/question
+                summary_text = (presentation_object or {}).get(
+                    "summary", "No summary available.")
+                append_chat("assistant", summary_text)
+
+                # Store results *only if* the turn is complete (not waiting for input)
+                if not is_waiting:
+                    st.session_state.last_response = presentation_object
+                    # Clear pending state ONLY when turn is fully complete
+                    st.session_state['current_agent_state'].pop(
+                        'pending_plan', None)
+                    st.session_state['current_agent_state'].pop(
+                        'missing_parameters', None)
+                    st.session_state['current_agent_state'].pop(
+                        'parameter_gathering_required', None)
+                    st.session_state['current_agent_state'].pop(
+                        'confirmation_required', None)
+                    st.session_state['current_agent_state'].pop(
+                        'compartment_selection_required', None)
+                else:
+                    # If waiting for user input, just display the message
+                    print("🔍 DEBUG: Agent is waiting for user input, not rerunning")
+
+                    # Clear the processing flag - UI will refresh to show the message
+                    st.session_state['agent_processing'] = False
+
+                # Clear the processing flag
+                st.session_state['agent_processing'] = False
             except Exception as e:
                 # Use fast LLM error handler for user-friendly messages
                 from core.fast_error_handler import handle_node_error
@@ -1032,13 +1091,15 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
                     "error_type": error_response['error_type']
                 }
 
+                # Clear pending state on error to avoid loops
+                st.session_state['current_agent_state'] = {}
+                # Clear the processing flag
+                st.session_state['agent_processing'] = False
+
             # REMOVED: Human-in-the-loop confirmation for full autonomy
             # All operations now run automatically without user confirmation
 
-            # Present results directly
-            summary_text = (presentation_object or {}).get(
-                "summary", "No summary available.")
-            append_chat("assistant", summary_text)
+            # Present results directly (message already added to chat history above)
             st.session_state.last_response = presentation_object
 
             # Display execution timing if available
@@ -1046,4 +1107,9 @@ if st.session_state.chat_history and st.session_state.chat_history[-1][0] == 'us
             if planning_time:
                 st.info(f"⏱️ Planning completed in {planning_time:.2f}s")
 
+            # Always rerun to refresh the UI, but the agent won't run again due to processing flag
             st.rerun()
+
+# Final cleanup - ensure processing flag is cleared
+if st.session_state.get('agent_processing', False):
+    st.session_state['agent_processing'] = False

@@ -134,11 +134,19 @@ create_volume_details = oci.core.models.CreateVolumeDetails(
     # This can be added via the 'kms_key_id' parameter if a key OCID is provided.
 )
 
-# Create the volume
-created_volume_response = blockstorage_client.create_volume(
-    create_volume_details=create_volume_details
-)
-
-# Append the created resource details (as a dictionary) to the results
-results.append(to_dict(created_volume_response.data))
+# Create the volume with error handling
+try:
+    created_volume_response = blockstorage_client.create_volume(
+        create_volume_details=create_volume_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(created_volume_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_volume',
+        'display_name': display_name,
+        'status': 'error',
+        'message': f'Failed to create volume: {e.message}'
+    })
 ```

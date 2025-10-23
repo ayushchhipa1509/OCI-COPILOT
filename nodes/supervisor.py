@@ -1,10 +1,10 @@
-# nodes/supervisor.py
-import json
-import re
-from core.state import AgentState
-from core.prompts import load_prompt
-from core.llm_manager import call_llm as default_call_llm
 from core.fast_error_handler import handle_node_error
+from core.llm_manager import call_llm as default_call_llm
+from core.prompts import load_prompt
+from core.state import AgentState
+import re
+import json
+# nodes/supervisor.py
 
 
 def _is_retryable_error(error_message: str) -> bool:
@@ -55,6 +55,74 @@ def _is_retryable_error(error_message: str) -> bool:
 
     # Default to retryable for unknown errors (conservative approach)
     return True
+
+
+def _llm_based_routing(state: AgentState, call_llm_func) -> dict:
+    """
+    Use LLM to analyze the current state and make intelligent routing decisions.
+    This replaces all the hardcoded logic with LLM-based decision making.
+    """
+    try:
+        # Load the supervisor prompt
+        prompt_template = load_prompt('supervisor')
+
+        # Create context for LLM analysis
+        context = f"""
+You are the intelligent supervisor of an OCI automation agent. Analyze the current state and make routing decisions.
+
+**Current State:**
+- Last Node: {state.get('last_node')}
+- User Input: {state.get('user_input', '')}
+- Next Step (from previous node): {state.get('next_step', 'None')}
+- Pending Plan: {state.get('pending_plan', {})}
+- Missing Parameters: {state.get('missing_parameters', [])}
+- Parameter Gathering Required: {state.get('parameter_gathering_required', False)}
+- Confirmation Required: {state.get('confirmation_required', False)}
+- Parameter Selection Response: {state.get('parameter_selection_response', '')}
+- Confirmation Response: {state.get('confirmation_response', '')}
+- Deferred Plan: {state.get('deferred_plan', {})}
+- Execution Result: {state.get('execution_result', {})}
+- Execution Error: {state.get('execution_error', '')}
+- Plan Error: {state.get('plan_error', '')}
+
+**Your Task:**
+Analyze this state and determine the next routing step. Consider:
+1. If last_node is "planner" and there are missing_parameters, route to presentation_node for parameter gathering
+2. If last_node is "planner" and no missing_parameters, route to codegen
+3. If user is providing parameters (parameter_selection_response), route to codegen
+4. If user is providing confirmation (confirmation_response), route to codegen
+5. If there are execution errors, handle appropriately
+6. If there are deferred plans, handle resumption
+
+**IMPORTANT:** Respect the flow: normalizer → planner → supervisor → (presentation_node OR codegen)
+
+**Response Format:**
+Respond with ONLY a JSON object containing the routing decision.
+Example: {{"next_step": "presentation_node", "parameter_gathering_required": true, "missing_parameters": ["compartment_id"]}}
+"""
+
+        messages = [
+            {"role": "system", "content": context},
+            {"role": "user",
+                "content": f"Analyze the state and make a routing decision for: {state.get('user_input', 'No input')}"}
+        ]
+
+        response = call_llm_func(state, messages, "supervisor")
+
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group(0))
+            print(f"🧠 LLM Routing Decision: {result}")
+            return result
+        else:
+            # Fallback if JSON parsing fails
+            print("⚠️ LLM routing failed to parse JSON, using fallback")
+            return {"next_step": "normalizer"}
+
+    except Exception as e:
+        print(f"⚠️ LLM routing failed: {e}, using fallback")
+        return {"next_step": "normalizer"}
 
 
 def _analyze_query_routing(user_input: str, call_llm_func, state: dict) -> dict:
@@ -117,10 +185,8 @@ Respond with ONLY a JSON object in this exact format:
 
 def supervisor_node(state: AgentState) -> dict:
     """
-    Enhanced supervisor node - Smart routing logic.
-    - Routes greetings and OCI knowledge questions directly to presentation
-    - Routes OCI operations to normalizer for processing
-    - Handles exception recovery from verifier
+    LLM-powered supervisor node - Intelligent routing and state management.
+    Uses LLM to analyze context and make intelligent routing decisions.
     """
     # Safety check: Prevent infinite loops
     recursion_count = state.get('recursion_count', 0)
@@ -157,244 +223,59 @@ def supervisor_node(state: AgentState) -> dict:
         f"🧠 SUPERVISOR: Conversation context: {len(conversation_context.get('recent_turns', []))}")
 
     try:
+        # COMPREHENSIVE DEBUG LOGGING
+        print(f"🔍 DEBUG: Current state keys: {list(state.keys())}")
+        print(f"🔍 DEBUG: user_input: '{state.get('user_input')}'")
+        print(f"🔍 DEBUG: last_node: '{state.get('last_node')}'")
+        print(f"🔍 DEBUG: next_step: '{state.get('next_step')}'")
+        print(
+            f"🔍 DEBUG: pending_plan exists: {state.get('pending_plan') is not None}")
+        print(
+            f"🔍 DEBUG: parameter_gathering_required: {state.get('parameter_gathering_required')}")
+        print(
+            f"🔍 DEBUG: missing_parameters: {state.get('missing_parameters')}")
+
+        # Use LLM for intelligent routing decisions
+        call_llm_func = state.get("call_llm", default_call_llm)
+
         # If this is the start of the graph, route directly to normalizer
         if state.get("last_node") is None:
             print("🕵️ Entry point: Routing to normalizer for query analysis")
+            # Clear any leftover state to ensure fresh start
+            state["pending_plan"] = None
+            state["missing_parameters"] = None
+            state["parameter_gathering_required"] = False
+            state["compartment_selection_required"] = False
+            state["confirmation_required"] = False
+            state["deferred_plan"] = None
             return {"next_step": "normalizer"}
 
-        # Clear any pending state when a new query comes in (before normalizer)
-        if state.get("pending_plan") and state.get("last_node") == "normalizer":
+        # Check if normalizer already set a next_step - respect it
+        if state.get("next_step") and state.get("last_node") == "normalizer":
             print(
-                "🕵️ Supervisor: New query detected while pending plan exists, clearing pending state")
-            return {
-                "next_step": "normalizer",  # Send back to normalizer with cleared state
-                "pending_plan": None,
-                "parameter_gathering_required": False,
-                "compartment_selection_required": False,
-                "confirmation_required": False,
-                "missing_parameters": None
-            }
+                f"🕵️ Normalizer already routed to: {state.get('next_step')} - respecting decision")
+            return {"next_step": state.get("next_step")}
 
-        # If called from normalizer with no pending state, route to planner
-        if state.get("last_node") == "normalizer" and not state.get("pending_plan"):
-            print("🕵️ Supervisor: New query from normalizer, routing to planner")
-            return {"next_step": "planner"}
-
-        # If called from the planner, check for confirmation requirements or failures
+        # If coming from planner, check for missing parameters and route accordingly
         if state.get("last_node") == "planner":
-            plan = state.get("plan")
-            plan_error = state.get("plan_error")
-
-            # Check if planner failed to create a plan
-            if plan_error or not plan:
-                print("🕵️ Supervisor: Planner failed, retrying with Pro model")
-                return {
-                    "next_step": "planner",
-                    "planner_retry": True,
-                    "retry_reason": "Plan generation failed"
-                }
-
-            # Trust the planner's decision about missing parameters - no redundant LLM analysis
+            plan = state.get("plan", {})
             missing_params = plan.get("missing_parameters", [])
-            print(
-                f"🕵️ Supervisor: Planner detected missing parameters: {missing_params}")
 
             if missing_params:
                 print(
-                    f"🕵️ Supervisor: Missing parameters detected, requesting user input")
+                    f"🕵️ Planner identified missing parameters: {missing_params} - routing to presentation_node")
                 return {
                     "next_step": "presentation_node",
                     "parameter_gathering_required": True,
                     "missing_parameters": missing_params,
-                    "pending_plan": plan,
-                    "gathering_type": "parameter_selection"
-                }
-
-            # Check for confirmation requirements
-            if plan and plan.get("requires_confirmation"):
-                print("🕵️ Supervisor: Mutating action detected, requesting confirmation")
-                return {
-                    "next_step": "presentation_node",
-                    "confirmation_required": True,
-                    "pending_plan": plan,
-                    "confirmation_type": "safety_confirmation"
+                    "pending_plan": plan
                 }
             else:
-                print("🕵️ Supervisor: Safe action, proceeding to codegen")
+                print(f"🕵️ Planner completed successfully - routing to codegen")
                 return {"next_step": "codegen"}
 
-        # If called from presentation with a confirmation response
-        if state.get("last_node") == "presentation_node" and state.get("confirmation_response"):
-            response = state.get("confirmation_response", "").lower().strip()
-            pending_plan = state.get("pending_plan")
-
-            if response in ["yes", "y", "confirm", "proceed"]:
-                print("🕵️ Supervisor: User confirmed action, proceeding to codegen")
-                return {
-                    "next_step": "codegen",
-                    "plan": pending_plan,
-                    "confirmation_approved": True
-                }
-            else:
-                print("🕵️ Supervisor: User cancelled action")
-                return {
-                    "next_step": "presentation_node",
-                    "action_cancelled": True,
-                    "cancellation_reason": "User declined to proceed with the operation"
-                }
-
-        # If called from presentation with parameter selection response
-        if state.get("last_node") == "presentation_node" and state.get("parameter_selection_response"):
-            from nodes.presentation_node import _parse_parameter_response
-
-            user_input = state.get("parameter_selection_response", "")
-            missing_params = state.get("missing_parameters", [])
-            pending_plan = state.get("pending_plan")
-
-            # Parse the user's parameter response
-            compartment_data = state.get("compartment_data", [])
-            call_llm_func = state.get("call_llm", default_call_llm)
-            success, selected_params = _parse_parameter_response(
-                user_input, missing_params, compartment_data, call_llm_func)
-
-            print(
-                f"🕵️ Supervisor: User selected parameters: {selected_params}")
-            print(f"🕵️ Supervisor: Parsing success: {success}")
-
-            # If parsing failed, ask user to try again
-            if not success:
-                print(f"🕵️ Supervisor: Failed to parse user input, re-prompting")
-                return {
-                    "next_step": "presentation_node",
-                    "parameter_gathering_required": True,
-                    "missing_parameters": missing_params,
-                    "pending_plan": pending_plan,
-                    "gathering_type": "parameter_selection",
-                    "re_prompt": True,
-                    "re_prompt_message": "I couldn't understand your response. Please provide the information in a clearer format, such as: compartment_id: ocid1.compartment.oc1..your_compartment_ocid"
-                }
-
-            # Update the plan with selected parameters
-            if pending_plan and "params" in pending_plan:
-                pending_plan["params"].update(selected_params)
-                print(
-                    f"🕵️ Supervisor: Updated plan with parameters: {pending_plan['params']}")
-
-            # CRITICAL FIX: Validate that all required parameters are now present
-            still_missing = [
-                p for p in missing_params if p not in pending_plan.get("params", {})]
-
-            if still_missing:
-                print(
-                    f"🕵️ Supervisor: Parameters still missing: {still_missing}. Re-prompting user.")
-                return {
-                    "next_step": "presentation_node",
-                    "parameter_gathering_required": True,
-                    "missing_parameters": still_missing,  # Update the list of what's still needed
-                    "pending_plan": pending_plan,
-                    "gathering_type": "parameter_selection",
-                    "re_prompt": True,
-                    "re_prompt_message": f"I still need the following information: {', '.join(still_missing)}. Please provide these details."
-                }
-
-            # Check if we still need confirmation
-            if pending_plan.get("requires_confirmation"):
-                print("🕵️ Supervisor: Parameters gathered, now requesting confirmation")
-                return {
-                    "next_step": "presentation_node",
-                    "confirmation_required": True,
-                    "pending_plan": pending_plan,
-                    "confirmation_type": "safety_confirmation"
-                }
-            else:
-                print("🕵️ Supervisor: Parameters gathered, proceeding to codegen")
-                return {
-                    "next_step": "codegen",
-                    "plan": pending_plan,
-                    "parameters_updated": True
-                }
-
-        # If called from planner with compartment listing result
-        if state.get("last_node") == "planner" and state.get("sub_task_result") == "compartment_listing":
-            print("🕵️ Supervisor: Compartment listing completed, routing to presentation")
-            return {
-                "next_step": "presentation_node",
-                "compartment_listing_complete": True,
-                "pending_plan": state.get("pending_plan"),
-                "missing_parameters": state.get("missing_parameters", [])
-            }
-
-        # If called from the verifier, handle syntax/static analysis errors
-        if state.get("last_node") == "verifier":
-            print("🕵️ Supervisor handling VERIFIER failure")
-
-            # Check if the plan is valid first
-            plan = state.get("plan")
-            plan_valid = state.get("plan_valid", False)
-
-            if not plan or not plan_valid:
-                print("🕵️ Supervisor: Invalid plan detected, retrying PLANNER")
-                return {
-                    "next_step": "planner",
-                    "planner_retry": True,
-                    "retry_reason": "Plan validation failed"
-                }
-
-            # If plan is valid but code failed, retry codegen
-            retries = state.get("verify_retries", 0)
-            max_retries = 1  # Limit for syntax errors
-
-            if retries < max_retries:
-                print(
-                    f"🔄 Code syntax error detected. Retrying CODEGEN with error context. (Attempt {retries + 1})")
-                return {
-                    "next_step": "codegen",
-                    "verify_retries": retries + 1,
-                    "feedback": f"Your previous code failed static verification: {state.get('critique', 'Syntax or structure error')}. Please analyze and fix the code structure.",
-                    "error_context": "syntax_error"
-                }
-            else:
-                print(
-                    f"❌ Code failed verification after {max_retries} retries. Giving up.")
-                error_message = "I was unable to generate valid code after correction attempts. Please try rephrasing your request."
-                return {
-                    "next_step": "presentation_node",
-                    "execution_error": error_message
-                }
-
-        # If called from the executor, handle runtime errors
-        if state.get("last_node") == "executor":
-            print("🕵️ Supervisor handling EXECUTOR failure (runtime error)")
-            retries = state.get("execution_retries", 0)
-            max_retries = 1  # Limit for runtime errors
-
-            # Check if error is retryable (code-related vs permission/network)
-            error_message = state.get("execution_error", "")
-            is_retryable = _is_retryable_error(error_message)
-
-            if retries < max_retries and is_retryable:
-                print(
-                    f"🔄 Runtime error detected. Retrying CODEGEN with execution context. (Attempt {retries + 1})")
-                return {
-                    "next_step": "codegen",
-                    "execution_retries": retries + 1,
-                    "feedback": f"Your previous code failed during execution: {error_message}. Please analyze the error and generate corrected code.",
-                    "error_context": "runtime_error"
-                }
-            else:
-                if not is_retryable:
-                    print(f"❌ Non-retryable error detected: {error_message}")
-                else:
-                    print(
-                        f"❌ Plan failed execution after {max_retries} retries. Giving up.")
-                return {
-                    "next_step": "presentation_node",
-                    "execution_error": error_message
-                }
-
-        # Default fallback
-        print("🕵️ Supervisor in fallback mode. Routing to normalizer.")
-        return {"next_step": "normalizer"}
+        # Use LLM to analyze the current state and make routing decisions
+        return _llm_based_routing(state, call_llm_func)
 
     except Exception as e:
         print(f"🚨 SUPERVISOR: Critical error occurred: {e}")

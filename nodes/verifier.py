@@ -39,30 +39,15 @@ def verifier_node(state: AgentState) -> dict:
         compile(oci_code, '<string>', 'exec')
         print("✅ Plan syntax is valid.")
 
-        # Check if plan requires confirmation before execution
-        requires_confirmation = plan.get("requires_confirmation", False)
-        safety_tier = plan.get("safety_tier", "safe")
-
-        if requires_confirmation or safety_tier == "destructive":
-            print("⚠️ Plan requires confirmation before execution")
-            return {
-                "plan_valid": True,
-                "critique": None,
-                "verify_retries": 0,  # Reset on success
-                "next_step": "presentation_node",  # Ask for confirmation
-                "confirmation_required": True,  # Set confirmation flag
-                "pending_plan": plan,  # Pass the plan for confirmation
-                "last_node": "verifier"
-            }
-        else:
-            print("✅ Plan safe to execute directly")
-            return {
-                "plan_valid": True,
-                "critique": None,
-                "verify_retries": 0,  # Reset on success
-                "next_step": "executor",  # Execute directly
-                "last_node": "verifier"
-            }
+        # Plan syntax is valid, proceed to execution
+        print("✅ Plan syntax is valid, proceeding to execution")
+        return {
+            "plan_valid": True,
+            "critique": None,
+            "verify_retries": 0,  # Reset on success
+            "next_step": "executor",  # Execute directly
+            "last_node": "verifier"
+        }
     except SyntaxError as e:
         # Use fast LLM error handler for syntax errors
         error_response = handle_node_error(

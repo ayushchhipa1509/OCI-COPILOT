@@ -73,17 +73,8 @@ def build_graph():
         }
     )
 
-    # 4. Planner chain logic - route through supervisor for parameter checking
-    graph.add_conditional_edges(
-        "planner",
-        lambda state: state.get("next_step", "supervisor"),
-        {
-            "supervisor": "supervisor",  # Check for missing parameters
-            "codegen": "codegen",  # Direct to codegen if no issues
-            "planner": "planner",  # Retry planner if needed
-            "presentation_node": "presentation_node"  # Error handling
-        }
-    )
+    # 4. Planner routes to supervisor for parameter checking and routing decisions
+    graph.add_edge("planner", "supervisor")
     graph.add_edge("codegen", "verifier")
 
     # 5. Verifier is the control gate for execution

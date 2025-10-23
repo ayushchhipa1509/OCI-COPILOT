@@ -27,10 +27,19 @@ def executor_node(state: AgentState) -> dict:
 
         # verify credentials are present
         oci_creds = state.get("oci_creds") or {}
+        print(f"🔍 DEBUG: OCI credentials check:")
+        print(f"   - oci_creds keys: {list(oci_creds.keys())}")
+        print(f"   - tenancy present: {bool(oci_creds.get('tenancy'))}")
+        print(f"   - user present: {bool(oci_creds.get('user'))}")
+        print(
+            f"   - fingerprint present: {bool(oci_creds.get('fingerprint'))}")
+        print(
+            f"   - key_content present: {bool(oci_creds.get('key_content'))}")
+
         if not oci_creds.get("tenancy"):
             return {"execution_error": "Missing tenancy in state['oci_creds'].", "last_node": "executor"}
 
-        print(f" Executing OCI code for service: {service}")
+        print(f"🚀 Executing OCI code for service: {service}")
 
         # Import required modules for code execution
         from oci_ops.clients import get_client, build_config
@@ -113,7 +122,20 @@ result = execute_oci_operation()
         return {"execution_result": sanitized_results, "last_node": "executor"}
 
     except Exception as e:
-        print(f" Execution failed: {e}")
+        import traceback
+        tb_str = traceback.format_exc()
+        error_details = f"Type: {type(e).__name__}, Args: {e.args}, Traceback:\n{tb_str}"
+        print(f"❌ Execution failed: {error_details}")
+
+        # Check if it's an OCI ServiceError specifically
+        if hasattr(e, 'status') and hasattr(e, 'message'):
+            print(
+                f"🔍 OCI Service Error Details: Status={e.status}, Message={e.message}")
+            return {
+                "execution_error": f"OCI API Error (Status {e.status}): {e.message}",
+                "last_node": "executor"
+            }
+
         return {"execution_error": str(e), "last_node": "executor"}
 
 

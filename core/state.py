@@ -70,6 +70,31 @@ class AgentState(TypedDict, total=False):
     pending_plan: Optional[Dict[str, Any]]
     gathering_type: Optional[str]
 
+    # --- Deferred Plans & Intent Switching ---
+    deferred_plan: Optional[Dict[str, Any]]
+    deferred_missing_parameters: Optional[List[str]]
+    prompt_for_resumption: bool
+    waiting_for_resumption_response: bool
+    resumed_after_prerequisite: bool
+
+    # --- Re-prompting & Error Handling ---
+    re_prompt: bool
+    re_prompt_message: Optional[str]
+
+    # --- Presentation & User Interaction ---
+    # Presentation object with summary, format, data
+    presentation: Optional[Dict[str, Any]]
+    conversational_response: Optional[str]  # For non-executable queries
+
+    # --- Execution & Retry Logic ---
+    execution_retries: int  # Track execution retry attempts
+    critique: Optional[str]  # Code verification feedback
+
+    # --- Additional State Fields ---
+    action_cancelled: bool  # Whether user cancelled an action
+    compartment_listing_complete: bool  # Whether compartment listing is done
+    data_source: Optional[str]  # "rag_cache" or "live_api"
+
     # --- Compartment Selection ---
     compartment_selection_required: bool
     compartment_data: Optional[List[Dict[str, Any]]]

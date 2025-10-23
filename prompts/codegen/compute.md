@@ -171,11 +171,19 @@ launch_details = oci.core.models.LaunchInstanceDetails(
     # This can be configured via the 'platform_config' parameter.
 )
 
-# Launch the instance
-launch_instance_response = compute_client.launch_instance(
-    launch_instance_details=launch_details
-)
-
-# Append the created resource details (as a dictionary) to the results
-results.append(to_dict(launch_instance_response.data))
+# Launch the instance with error handling
+try:
+    launch_instance_response = compute_client.launch_instance(
+        launch_instance_details=launch_details
+    )
+    # Append the created resource details to results
+    results.append(to_dict(launch_instance_response.data))
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'launch_instance',
+        'display_name': display_name,
+        'status': 'error',
+        'message': f'Failed to launch instance: {e.message}'
+    })
 ```

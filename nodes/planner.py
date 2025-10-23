@@ -50,6 +50,22 @@ def planner_node(state: AgentState) -> dict:
     print(f"   Confidence: {analysis_result.get('confidence')}")
     print(f"   Method: {analysis_result.get('analysis_method')}")
 
+    # Step 1.5: Extract embedded parameters from the query using LLM
+    action = analysis_result.get('action', '')
+    if action and action.startswith(('create_', 'delete_', 'update_', 'launch_')):
+        print(f"🔍 Step 1.5: Extracting embedded parameters using LLM...")
+        extraction_result = _extract_embedded_parameters(
+            normalized_query, action, call_llm_func)
+        if extraction_result.get('extracted_parameters'):
+            print(
+                f"✅ Extracted embedded parameters: {extraction_result['extracted_parameters']}")
+            # Store extracted parameters in analysis_result for later use
+            analysis_result['extracted_parameters'] = extraction_result['extracted_parameters']
+            analysis_result['extraction_confidence'] = extraction_result['confidence']
+            analysis_result['extraction_reasoning'] = extraction_result['reasoning']
+        else:
+            print(f"ℹ️ No embedded parameters found")
+
     # Step 2: Route based on execution type
     execution_type = analysis_result.get('execution_type')
     print(f"🔍 DEBUG: Execution type detected: {execution_type}")
@@ -234,10 +250,11 @@ def _handle_multi_step(normalized_query: str, analysis_result: dict, state: dict
         total_time = time.time() - start_time
         return {
             "plan": None,
-            "plan_error": f"Multi-step planning error: {error_msg}",
+            "plan_error": error_response.get('user_message', f"Multi-step planning error: {error_msg}"),
             "last_node": "planner",
             "planning_time": total_time,
-            "execution_strategy": "multi_step"
+            "execution_strategy": "error",
+            "next_step": "presentation_node"  # CRITICAL: Route to presentation_node on error
         }
 
 
@@ -333,10 +350,11 @@ def _handle_llm_fallback(normalized_query: str, analysis_result: dict, state: di
         total_time = time.time() - start_time
         return {
             "plan": None,
-            "plan_error": error_response['user_message'],
+            "plan_error": error_response.get('user_message', f"Fallback planning error: {str(e)}"),
             "last_node": "planner",
             "planning_time": total_time,
-            "execution_strategy": "llm_fallback"
+            "execution_strategy": "error",
+            "next_step": "presentation_node"  # CRITICAL: Route to presentation_node on error
         }
 
 
@@ -399,79 +417,157 @@ def _convert_template_to_plan(template_plan: dict, analysis_result: dict) -> dic
     return plan
 
 
+def _get_known_required_parameters():
+    """
+    Get the known required parameters for OCI actions.
+    This is the single source of truth for parameter requirements.
+    """
+    return {
+        "create_vcn": ["compartment_id", "cidr_block", "display_name"],
+        "create_subnet": ["compartment_id", "vcn_id", "cidr_block"],
+        "create_bucket": ["compartment_id", "name"],
+        "create_volume": ["compartment_id", "availability_domain", "size_in_gbs"],
+        "launch_instance": ["compartment_id", "shape", "image_id", "subnet_id"],
+        "create_compartment": ["compartment_id", "name", "description"],
+        "create_group": ["compartment_id", "name", "description"],
+        "create_user": ["compartment_id", "name", "description"],
+        "delete_bucket": ["name"],
+        "create_load_balancer": ["compartment_id", "shape_name", "subnet_ids"]
+    }
+
+
+def _extract_embedded_parameters(query: str, action: str, call_llm_func) -> dict:
+    """
+    Extract parameters embedded in natural language queries using LLM.
+    """
+    try:
+        # Load the parameter extraction prompt
+        parameter_prompt = load_prompt('require_parameter')
+
+        # Get known required parameters
+        known_required = _get_known_required_parameters()
+        required_params = known_required.get(action, [])
+
+        # Fill in the prompt template
+        parameter_prompt = parameter_prompt.replace('{query}', query)
+        parameter_prompt = parameter_prompt.replace('{action}', action)
+        parameter_prompt = parameter_prompt.replace(
+            '{required_params}', str(required_params))
+
+        messages = [
+            {'role': 'system', 'content': parameter_prompt},
+            {'role': 'user', 'content': f"Query: {query}\nAction: {action}\nRequired Parameters: {required_params}"}
+        ]
+
+        # Call LLM for parameter extraction
+        response = call_llm_func(
+            {"llm_preference": {"provider": "gemini"}}, messages, "planner")
+
+        # Parse the JSON response
+        import json
+        result = json.loads(response)
+
+        extracted_params = result.get('extracted_parameters', {})
+        confidence = result.get('confidence', 'low')
+        reasoning = result.get('reasoning', '')
+        missing_params = result.get('missing_parameters', [])
+
+        print(f"🧠 LLM Parameter Extraction:")
+        print(f"   Extracted: {extracted_params}")
+        print(f"   Confidence: {confidence}")
+        print(f"   Reasoning: {reasoning}")
+        print(f"   Missing: {missing_params}")
+
+        return {
+            'extracted_parameters': extracted_params,
+            'confidence': confidence,
+            'reasoning': reasoning,
+            'missing_parameters': missing_params
+        }
+
+    except Exception as e:
+        print(f"⚠️ LLM parameter extraction failed: {e}")
+        return {
+            'extracted_parameters': {},
+            'confidence': 'low',
+            'reasoning': f'Extraction failed: {e}',
+            'missing_parameters': []
+        }
+
+
 def _apply_safety_flags(plan: dict, analysis_result: dict) -> dict:
     """
-    Apply safety flags to the plan based on analysis results.
-    Adds requires_confirmation and missing_parameters flags.
+    Apply safety flags and VERIFY missing parameters programmatically for critical actions.
+    Uses hybrid approach: known_required dictionary for common actions, LLM fallback for others.
     """
     if not isinstance(plan, dict):
+        print("⚠️ _apply_safety_flags: Invalid plan input (not a dict)")
         return plan
 
-    # Check if action is mutating
-    is_mutating = analysis_result.get('is_mutating', False)
     action = plan.get('action', '')
+    params = plan.get('params', {})
+    # Get the missing params list potentially generated by the main planning LLM
+    llm_missing_params = plan.get('missing_parameters', [])
 
-    # Only check parameters for DEPLOYMENT/CREATION operations, not data fetching
-    is_deployment_operation = action.startswith(
-        'create_') or action.startswith('deploy_')
-    is_multi_step = 'steps' in plan and isinstance(plan.get('steps'), list)
+    # Get extracted parameters from analysis_result if available
+    extracted_params = analysis_result.get('extracted_parameters', {})
+    if extracted_params:
+        print(f"🔍 Using extracted parameters: {extracted_params}")
+        # Merge extracted parameters into the plan
+        if 'params' not in plan:
+            plan['params'] = {}
+        plan['params'].update(extracted_params)
+        params = plan['params']  # Update params for further processing
 
-    if is_mutating and (is_deployment_operation or is_multi_step):
-        print(f"⚠️ Mutating deployment action detected: {action}")
+    # Get known required parameters (single source of truth)
+    known_required = _get_known_required_parameters()
+
+    programmatic_missing_params = []
+    is_mutating = analysis_result.get('is_mutating', False) or action.startswith(
+        ('create_', 'delete_', 'update_', 'launch_'))
+    is_known_action = action in known_required
+
+    # Determine Safety Tier and Confirmation Requirement
+    if is_mutating:
         plan['requires_confirmation'] = True
         plan['safety_tier'] = 'destructive'
-
-        # Check for missing parameters based on action type
-        missing_params = []
-        params = plan.get('params', {})
-
-        if is_multi_step:
-            # For multi-step plans, check if compartment_id is missing in steps
-            steps = plan.get('steps', [])
-            if steps:
-                # Check if the first step has compartment_id
-                first_step_params = steps[0].get('params', {})
-                if 'compartment_id' not in first_step_params:
-                    missing_params = ['compartment_id']
-                else:
-                    missing_params = []
-            else:
-                missing_params = ['compartment_id']
-        elif action == 'create_instance':
-            required_params = ['compartment_id',
-                               'shape', 'image_id', 'subnet_id']
-            missing_params = [
-                param for param in required_params if param not in params]
-        elif action == 'create_bucket':
-            required_params = ['compartment_id', 'name']
-            missing_params = [
-                param for param in required_params if param not in params]
-        elif action == 'create_volume':
-            required_params = ['compartment_id', 'size_in_gbs']
-            missing_params = [
-                param for param in required_params if param not in params]
-        elif action == 'create_load_balancer':
-            required_params = ['compartment_id', 'shape_name', 'subnet_ids']
-            missing_params = [
-                param for param in required_params if param not in params]
-        elif action == 'delete_bucket':
-            required_params = ['name']
-            missing_params = [
-                param for param in required_params if param not in params]
-
-        if missing_params:
-            plan['missing_parameters'] = missing_params
-            print(f"⚠️ Missing parameters: {missing_params}")
-        else:
-            print(f"✅ All required parameters present")
-
-        print(f"🔍 DEBUG: Plan params: {plan.get('params', {})}")
-        if not is_multi_step:
-            print(f"🔍 DEBUG: Required params: {required_params}")
-        print(f"🔍 DEBUG: Missing params: {missing_params}")
     else:
-        print(f"✅ Safe action: {action} (no parameter check needed)")
-        plan['safety_tier'] = 'safe'
+        plan['requires_confirmation'] = False
+        plan['safety_tier'] = 'safe'  # Default safe for list/get etc.
+
+    # Programmatically determine missing params ONLY for known mutating actions
+    if is_mutating and is_known_action:
+        required_params = known_required[action]
+        print(
+            f"Applying programmatic check for known action '{action}'. Required: {required_params}")
+        for param in required_params:
+            if param not in params or params.get(param) is None or str(params.get(param)).strip() == "":
+                programmatic_missing_params.append(param)
+
+        # --- Reconciliation Logic ---
+        # Trust the programmatic check absolutely for known actions
+        if set(programmatic_missing_params) != set(llm_missing_params):
+            print(
+                f"⚠️ Discrepancy: LLM missing params {llm_missing_params}, Programmatic check found {programmatic_missing_params}. Using programmatic list.")
+
+        # OVERWRITE with the verified list
+        plan['missing_parameters'] = programmatic_missing_params
+
+        if programmatic_missing_params:
+            print(
+                f"✅ Verified Missing parameters: {programmatic_missing_params}")
+        else:
+            print(f"✅ Verified: All required parameters present for {action}")
+
+    elif is_mutating:  # Mutating action, but not in our known list
+        # Trust the LLM's list if it's an unknown action
+        plan['missing_parameters'] = llm_missing_params
+        print(
+            f"⚠️ Unknown mutating action '{action}'. Relying on LLM for missing params: {llm_missing_params}")
+    else:  # Safe action (list/get)
+        # Clear missing params for safe actions
+        plan.pop('missing_parameters', None)
+        print(f"✅ Safe action '{action}'. No parameter check needed.")
 
     return plan
 

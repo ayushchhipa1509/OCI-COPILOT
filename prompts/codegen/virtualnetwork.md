@@ -99,26 +99,36 @@ create_vcn_details = oci.core.models.CreateVcnDetails(
     display_name=display_name
 )
 
-# Create the VCN. This is an asynchronous operation.
-create_vcn_response = virtual_network_client.create_vcn(
-    create_vcn_details=create_vcn_details
-)
+# Create the VCN with error handling. This is an asynchronous operation.
+try:
+    create_vcn_response = virtual_network_client.create_vcn(
+        create_vcn_details=create_vcn_details
+    )
 
-# Best Practice: Use a waiter to confirm the resource is fully provisioned.
-# We get the new VCN's OCID from the response data.
-vcn_ocid = create_vcn_response.data.id
+    # Best Practice: Use a waiter to confirm the resource is fully provisioned.
+    # We get the new VCN's OCID from the response data.
+    vcn_ocid = create_vcn_response.data.id
 
-# Wait until the VCN's lifecycle state becomes 'AVAILABLE'.
-get_vcn_response = oci.wait_until(
-    virtual_network_client,
-    virtual_network_client.get_vcn(vcn_ocid),
-    'lifecycle_state',
-    'AVAILABLE'
-)
+    # Wait until the VCN's lifecycle state becomes 'AVAILABLE'.
+    get_vcn_response = oci.wait_until(
+        virtual_network_client,
+        virtual_network_client.get_vcn(vcn_ocid),
+        'lifecycle_state',
+        'AVAILABLE'
+    )
 
-# Once the wait is successful, the fully provisioned VCN details are in the response.
-# Append the final, confirmed resource details (as a dictionary) to the results.
-results.append(to_dict(get_vcn_response.data))
+    # Once the wait is successful, the fully provisioned VCN details are in the response.
+    # Append the final, confirmed resource details to results.
+    results.append(to_dict(get_vcn_response.data))
+
+except oci.exceptions.ServiceError as e:
+    # Append error result
+    results.append({
+        'action': 'create_vcn',
+        'display_name': display_name,
+        'status': 'error',
+        'message': f'Failed to create VCN: {e.message}'
+    })
 ```
 
 ### 6. Create Action: `create_subnet`
